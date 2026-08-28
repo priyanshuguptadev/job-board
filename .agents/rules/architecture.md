@@ -13,7 +13,7 @@ flowchart TD
 
     subgraph ServerLayer ["Job Board API Server (Go)"]
         AuthMW["API Key Auth Middleware<br/>(Public vs Secret Scope)"]
-        Router["HTTP Router (Chi/Gin)"]
+        Router["HTTP Router (Chi)"]
         
         subgraph ServicesLayer ["Services"]
             JobSvc["Job Service"]
@@ -52,7 +52,7 @@ flowchart TD
 | Component | Technology | Rationale |
 | :--- | :--- | :--- |
 | **Language & Runtime** | Go 1.22+ | Single static binary, low memory footprint (~20MB), high throughput, easy containerization |
-| **HTTP Router / Web Framework** | `chi` (or `gin`) | Lightweight, idiomatic `net/http` compatibility, composable middleware |
+| **HTTP Router / Web Framework** | `chi` | Lightweight, idiomatic `net/http` compatibility, composable middleware |
 | **Database** | PostgreSQL 15+ | ACID compliance, `JSONB` for dynamic custom application form fields, indexing |
 | **Migrations** | `golang-migrate` (embedded) | Auto-migrates database on startup or via CLI subcommands |
 | **Object Storage** | AWS S3 SDK (`aws-sdk-go-v2`) | Compatible with AWS S3, Cloudflare R2, MinIO, Google Cloud Storage, Wasabi |
