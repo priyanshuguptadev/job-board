@@ -6,7 +6,8 @@
 *.dll
 *.so
 *.dylib
-server
+/server
+/jobboard
 
 # Environment & local secrets
 .env
