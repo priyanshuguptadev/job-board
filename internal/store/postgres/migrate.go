@@ -37,7 +37,6 @@ func MigrateUp(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer m.Close()
 
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("migration up failed: %w", err)
@@ -56,7 +55,6 @@ func MigrateDown(db *sql.DB, steps int) error {
 	if err != nil {
 		return err
 	}
-	defer m.Close()
 
 	if err := m.Steps(-steps); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("migration down failed: %w", err)
@@ -71,7 +69,6 @@ func MigrationVersion(db *sql.DB) (uint, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
-	defer m.Close()
 
 	version, dirty, err := m.Version()
 	if err != nil {

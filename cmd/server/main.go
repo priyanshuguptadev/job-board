@@ -17,6 +17,7 @@ import (
 
 	"github.com/priyanshuguptadev/job-board/internal/api"
 	"github.com/priyanshuguptadev/job-board/internal/config"
+	"github.com/priyanshuguptadev/job-board/internal/domain"
 	"github.com/priyanshuguptadev/job-board/internal/logger"
 	"github.com/priyanshuguptadev/job-board/internal/store/postgres"
 )
@@ -252,10 +253,13 @@ func runKeygen(args []string) {
 		db, err := postgres.NewDB(cfg.Database)
 		if err == nil {
 			defer db.Close()
-			_, err = db.Exec(
-				"INSERT INTO api_keys (name, key_hash, key_prefix, scope) VALUES ($1, $2, $3, $4)",
-				*name, keyHash, prefix, *scope,
-			)
+			keyRepo := postgres.NewApiKeyRepository(db)
+			err = keyRepo.Create(context.Background(), &domain.ApiKey{
+				Name:      *name,
+				KeyHash:   keyHash,
+				KeyPrefix: prefix,
+				Scope:     domain.ApiKeyScope(*scope),
+			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to persist API key to database: %v\n", err)
 			} else {
