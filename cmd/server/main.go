@@ -2,10 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"net/http"
@@ -16,6 +13,7 @@ import (
 	"time"
 
 	"github.com/priyanshuguptadev/job-board/internal/api"
+	"github.com/priyanshuguptadev/job-board/internal/auth"
 	"github.com/priyanshuguptadev/job-board/internal/config"
 	"github.com/priyanshuguptadev/job-board/internal/domain"
 	"github.com/priyanshuguptadev/job-board/internal/logger"
@@ -231,22 +229,11 @@ func runKeygen(args []string) {
 		os.Exit(1)
 	}
 
-	var prefix string
-	if *scope == "admin" {
-		prefix = "jb_sec_"
-	} else {
-		prefix = "jb_pub_"
-	}
-
-	randomBytes := make([]byte, 24)
-	if _, err := rand.Read(randomBytes); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to generate random bytes: %v\n", err)
+	token, apiKey, err := auth.GenerateKey(*name, domain.ApiKeyScope(*scope))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to generate API key: %v\n", err)
 		os.Exit(1)
 	}
-
-	token := prefix + hex.EncodeToString(randomBytes)
-	hashBytes := sha256.Sum256([]byte(token))
-	keyHash := hex.EncodeToString(hashBytes[:])
 
 	cfg, _ := config.Load()
 	if cfg != nil && cfg.Database.URL != "" {
@@ -254,12 +241,7 @@ func runKeygen(args []string) {
 		if err == nil {
 			defer db.Close()
 			keyRepo := postgres.NewApiKeyRepository(db)
-			err = keyRepo.Create(context.Background(), &domain.ApiKey{
-				Name:      *name,
-				KeyHash:   keyHash,
-				KeyPrefix: prefix,
-				Scope:     domain.ApiKeyScope(*scope),
-			})
+			err = keyRepo.Create(context.Background(), apiKey)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to persist API key to database: %v\n", err)
 			} else {
@@ -270,10 +252,10 @@ func runKeygen(args []string) {
 
 	fmt.Println()
 	fmt.Println("=================================================================")
-	fmt.Printf("Key Name : %s\n", *name)
-	fmt.Printf("Scope    : %s\n", *scope)
-	fmt.Printf("Prefix   : %s\n", prefix)
-	fmt.Printf("Key Hash : %s\n", keyHash)
+	fmt.Printf("Key Name : %s\n", apiKey.Name)
+	fmt.Printf("Scope    : %s\n", apiKey.Scope)
+	fmt.Printf("Prefix   : %s\n", apiKey.KeyPrefix)
+	fmt.Printf("Key Hash : %s\n", apiKey.KeyHash)
 	fmt.Println("-----------------------------------------------------------------")
 	fmt.Printf("API Key  : %s\n", token)
 	fmt.Println("=================================================================")

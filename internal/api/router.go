@@ -7,37 +7,36 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 	"github.com/priyanshuguptadev/job-board/internal/api/middleware"
 	"github.com/priyanshuguptadev/job-board/internal/config"
+	"github.com/priyanshuguptadev/job-board/internal/domain"
+	"github.com/priyanshuguptadev/job-board/internal/store/postgres"
 )
 
 // RouterConfig contains dependencies and configuration for setting up the router.
 type RouterConfig struct {
-	Config *config.Config
-	Logger *slog.Logger
-	DB     *sql.DB
+	Config     *config.Config
+	Logger     *slog.Logger
+	DB         *sql.DB
+	ApiKeyRepo domain.ApiKeyRepository
 }
 
 // NewRouter initializes and returns a Chi router configured with middlewares and routes.
 func NewRouter(rc RouterConfig) *chi.Mux {
 	r := chi.NewRouter()
 
+	// Resolve API key repository if not provided but DB is available
+	apiKeyRepo := rc.ApiKeyRepo
+	if apiKeyRepo == nil && rc.DB != nil {
+		apiKeyRepo = postgres.NewApiKeyRepository(rc.DB)
+	}
+
 	// Base middlewares
 	r.Use(chimiddleware.RequestID)
 	r.Use(chimiddleware.RealIP)
 	r.Use(middleware.Logger(rc.Logger))
 	r.Use(middleware.Recoverer(rc.Logger))
-
-	// CORS middleware
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   rc.Config.Server.CORSAllowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-API-Key", "X-JobBoard-Signature"},
-		ExposedHeaders:   []string{"Link", "Location"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+	r.Use(middleware.CORS(rc.Config.Server.CORSAllowedOrigins))
 
 	// Standard error handlers for 404 & 405
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +46,7 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 		RespondError(w, http.StatusMethodNotAllowed, ErrCodeNotFound, "Method not allowed on this endpoint.")
 	})
 
-	// Health check endpoint
+	// System & Observability endpoints
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		status := "ok"
 		dbStatus := "disabled"
@@ -67,6 +66,32 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 		RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"status":   status,
 			"database": dbStatus,
+		})
+	})
+
+	// API v1 Subrouter
+	r.Route("/v1", func(v1 chi.Router) {
+		// Public routes (Rate limited + Public API Key scope)
+		v1.Route("/public", func(public chi.Router) {
+			public.Use(middleware.RateLimit(rc.Config.Server.RateLimitRPS, rc.Config.Server.RateLimitBurst))
+			if apiKeyRepo != nil {
+				public.Use(middleware.ApiKeyAuth(apiKeyRepo, domain.ApiKeyScopePublic, rc.Logger))
+			}
+
+			public.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
+				RespondJSON(w, http.StatusOK, map[string]string{"message": "pong"})
+			})
+		})
+
+		// Admin routes (Admin API Key scope)
+		v1.Route("/admin", func(admin chi.Router) {
+			if apiKeyRepo != nil {
+				admin.Use(middleware.ApiKeyAuth(apiKeyRepo, domain.ApiKeyScopeAdmin, rc.Logger))
+			}
+
+			admin.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
+				RespondJSON(w, http.StatusOK, map[string]string{"message": "pong"})
+			})
 		})
 	})
 
