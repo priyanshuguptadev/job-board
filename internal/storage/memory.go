@@ -51,10 +51,8 @@ func (m *MemoryStorage) SetBaseURL(baseURL string) {
 
 // Upload stores an object in memory.
 func (m *MemoryStorage) Upload(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	data, err := io.ReadAll(body)
@@ -82,10 +80,8 @@ func (m *MemoryStorage) Upload(ctx context.Context, key string, body io.Reader, 
 
 // GetPresignedURL simulates generating a presigned download URL for an in-memory object.
 func (m *MemoryStorage) GetPresignedURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 
 	if expiry <= 0 {
@@ -109,10 +105,8 @@ func (m *MemoryStorage) GetPresignedURL(ctx context.Context, key string, expiry 
 
 // Delete removes an object from in-memory storage.
 func (m *MemoryStorage) Delete(ctx context.Context, key string) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
@@ -124,10 +118,8 @@ func (m *MemoryStorage) Delete(ctx context.Context, key string) error {
 
 // Download retrieves an object from in-memory storage as a ReadCloser.
 func (m *MemoryStorage) Download(ctx context.Context, key string) (io.ReadCloser, string, int64, error) {
-	select {
-	case <-ctx.Done():
-		return nil, "", 0, ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return nil, "", 0, err
 	}
 
 	m.mu.RLock()
@@ -146,10 +138,8 @@ func (m *MemoryStorage) Download(ctx context.Context, key string) (io.ReadCloser
 
 // Exists checks if an object exists in in-memory storage.
 func (m *MemoryStorage) Exists(ctx context.Context, key string) (bool, error) {
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 
 	m.mu.RLock()

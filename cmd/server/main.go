@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -63,6 +64,7 @@ func runServer() {
 	}
 
 	l := logger.New(cfg.Server.Env, cfg.Server.LogLevel)
+	slog.SetDefault(l)
 	l.Info("Starting Job Board API",
 		"env", cfg.Server.Env,
 		"port", cfg.Server.Port,

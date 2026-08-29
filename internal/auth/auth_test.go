@@ -188,7 +188,9 @@ func TestContextHelpers(t *testing.T) {
 	key, ok := GetApiKey(ctx)
 	assert.False(t, ok)
 	assert.Nil(t, key)
-	assert.Nil(t, MustGetApiKey(ctx))
+	assert.Panics(t, func() {
+		MustGetApiKey(ctx)
+	})
 
 	testKey := &domain.ApiKey{
 		ID:    "key-123",

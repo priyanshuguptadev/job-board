@@ -137,7 +137,7 @@ func TestMethodNotAllowedHandler(t *testing.T) {
 	var resp api.ErrorResponse
 	err := json.Unmarshal(rec.Body.Bytes(), &resp)
 	require.NoError(t, err)
-	assert.Equal(t, api.ErrCodeNotFound, resp.Error.Code)
+	assert.Equal(t, api.ErrCodeMethodNotAllowed, resp.Error.Code)
 }
 
 func TestRouterAuthAndScoping(t *testing.T) {
