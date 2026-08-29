@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/priyanshuguptadev/job-board/internal/domain"
 )
 
 const (
@@ -24,7 +26,7 @@ const (
 var (
 	ErrFileEmpty            = errors.New("resume file cannot be empty")
 	ErrFileTooLarge         = errors.New("file exceeds the maximum allowed size of 10MB")
-	ErrUnsupportedMediaType = errors.New("resume upload is not an allowed MIME type (PDF, DOC, DOCX)")
+	ErrUnsupportedMediaType = domain.ErrUnsupportedMediaType
 	ErrInvalidFilename      = errors.New("invalid resume file name")
 )
 

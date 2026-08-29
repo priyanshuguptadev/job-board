@@ -125,17 +125,14 @@ func RateLimit(rps int, burst int) func(next http.Handler) http.Handler {
 
 // getIP extracts the client's IP address from the request.
 func getIP(r *http.Request) string {
-	// RemoteAddr is guaranteed to be populated; RealIP middleware might also have normalized it
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && host != "" {
-		return host
-	}
-
 	if r.RemoteAddr != "" {
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && host != "" {
+			return host
+		}
 		return strings.TrimSpace(r.RemoteAddr)
 	}
 
-	// Fallback to headers if RemoteAddr is somehow empty
+	// Fallback to headers if RemoteAddr is empty
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {

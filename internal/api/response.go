@@ -10,6 +10,7 @@ const (
 	ErrCodeInvalidAPIKey        = "INVALID_API_KEY"
 	ErrCodeForbidden            = "FORBIDDEN"
 	ErrCodeNotFound             = "NOT_FOUND"
+	ErrCodeMethodNotAllowed     = "METHOD_NOT_ALLOWED"
 	ErrCodeValidationError      = "VALIDATION_ERROR"
 	ErrCodeUnsupportedMediaType = "UNSUPPORTED_MEDIA_TYPE"
 	ErrCodeRateLimitExceeded    = "RATE_LIMIT_EXCEEDED"

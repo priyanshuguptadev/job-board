@@ -39,7 +39,5 @@ func NewWithWriter(env, levelStr string, w io.Writer) *slog.Logger {
 		handler = slog.NewJSONHandler(w, opts)
 	}
 
-	l := slog.New(handler)
-	slog.SetDefault(l)
-	return l
+	return slog.New(handler)
 }

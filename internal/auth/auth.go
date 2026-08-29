@@ -143,8 +143,11 @@ func GetApiKey(ctx context.Context) (*domain.ApiKey, bool) {
 	return key, ok
 }
 
-// MustGetApiKey retrieves the authenticated API key from context or returns nil.
+// MustGetApiKey retrieves the authenticated API key from context or panics if not present.
 func MustGetApiKey(ctx context.Context) *domain.ApiKey {
-	key, _ := GetApiKey(ctx)
+	key, ok := GetApiKey(ctx)
+	if !ok || key == nil {
+		panic("auth: api key not found in context")
+	}
 	return key
 }

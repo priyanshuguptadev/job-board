@@ -43,7 +43,7 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 		RespondError(w, http.StatusNotFound, ErrCodeNotFound, "The requested resource was not found.")
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
-		RespondError(w, http.StatusMethodNotAllowed, ErrCodeNotFound, "Method not allowed on this endpoint.")
+		RespondError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed, "Method not allowed on this endpoint.")
 	})
 
 	// System & Observability endpoints

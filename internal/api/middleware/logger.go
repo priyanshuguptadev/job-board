@@ -10,6 +10,9 @@ import (
 
 // Logger returns a middleware that logs incoming HTTP requests using structured slog.
 func Logger(l *slog.Logger) func(next http.Handler) http.Handler {
+	if l == nil {
+		l = slog.Default()
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)

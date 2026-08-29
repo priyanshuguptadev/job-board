@@ -214,7 +214,7 @@ func TestS3Storage_Operations(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, content, downloaded)
 	_ = rc.Close()
-	_ = size
+	assert.Equal(t, int64(len(content)), size)
 
 	// 5. Presigned URL generation
 	presignedURL, err := storage.GetPresignedURL(ctx, key, 10*time.Minute)

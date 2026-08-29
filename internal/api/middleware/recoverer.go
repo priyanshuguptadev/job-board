@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,6 +9,9 @@ import (
 
 // Recoverer recovers from panics, logs stack traces, and returns a standard JSON error response.
 func Recoverer(l *slog.Logger) func(next http.Handler) http.Handler {
+	if l == nil {
+		l = slog.Default()
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
@@ -26,14 +28,7 @@ func Recoverer(l *slog.Logger) func(next http.Handler) http.Handler {
 						"method", r.Method,
 					)
 
-					w.Header().Set("Content-Type", "application/json; charset=utf-8")
-					w.WriteHeader(http.StatusInternalServerError)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
-						"error": map[string]interface{}{
-							"code":    "INTERNAL_SERVER_ERROR",
-							"message": "An unexpected server error occurred.",
-						},
-					})
+					respondJSONError(w, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "An unexpected server error occurred.")
 				}
 			}()
 
