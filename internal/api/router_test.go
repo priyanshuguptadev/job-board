@@ -1,14 +1,17 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +20,8 @@ import (
 	"github.com/priyanshuguptadev/job-board/internal/auth"
 	"github.com/priyanshuguptadev/job-board/internal/config"
 	"github.com/priyanshuguptadev/job-board/internal/domain"
+	"github.com/priyanshuguptadev/job-board/internal/service"
+	"github.com/priyanshuguptadev/job-board/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -65,7 +70,167 @@ func (m *mockApiKeyRepo) Delete(_ context.Context, _ string) error {
 	return nil
 }
 
+type mockJobRepo struct {
+	mu          sync.Mutex
+	jobs        map[string]*domain.Job
+	slugIndex   map[string]string
+	departments []string
+}
+
+func newMockJobRepo() *mockJobRepo {
+	return &mockJobRepo{
+		jobs:        make(map[string]*domain.Job),
+		slugIndex:   make(map[string]string),
+		departments: []string{"Engineering", "Product"},
+	}
+}
+
+func (m *mockJobRepo) Create(_ context.Context, job *domain.Job) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobs[job.ID] = job
+	m.slugIndex[job.Slug] = job.ID
+	return nil
+}
+
+func (m *mockJobRepo) GetByID(_ context.Context, id string) (*domain.Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.jobs[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return job, nil
+}
+
+func (m *mockJobRepo) GetBySlug(_ context.Context, slug string) (*domain.Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id, ok := m.slugIndex[slug]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return m.jobs[id], nil
+}
+
+func (m *mockJobRepo) GetByIDOrSlug(ctx context.Context, idOrSlug string) (*domain.Job, error) {
+	if job, err := m.GetByID(ctx, idOrSlug); err == nil {
+		return job, nil
+	}
+	return m.GetBySlug(ctx, idOrSlug)
+}
+
+func (m *mockJobRepo) List(_ context.Context, filter domain.JobListFilter) ([]*domain.Job, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var res []*domain.Job
+	for _, j := range m.jobs {
+		if filter.Status != "" && j.Status != filter.Status {
+			continue
+		}
+		if filter.Department != "" && j.Department != filter.Department {
+			continue
+		}
+		if filter.Location != "" && !strings.Contains(strings.ToLower(j.Location), strings.ToLower(filter.Location)) {
+			continue
+		}
+		if filter.EmploymentType != "" && j.EmploymentType != filter.EmploymentType {
+			continue
+		}
+		res = append(res, j)
+	}
+	return res, len(res), nil
+}
+
+func (m *mockJobRepo) ListDepartments(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.departments, nil
+}
+
+func (m *mockJobRepo) Update(_ context.Context, job *domain.Job) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobs[job.ID] = job
+	return nil
+}
+
+func (m *mockJobRepo) Delete(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.jobs, id)
+	return nil
+}
+
+type mockAppRepo struct {
+	mu   sync.Mutex
+	apps map[string]*domain.Application
+}
+
+func newMockAppRepo() *mockAppRepo {
+	return &mockAppRepo{
+		apps: make(map[string]*domain.Application),
+	}
+}
+
+func (m *mockAppRepo) Create(_ context.Context, app *domain.Application) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.apps[app.ID] = app
+	return nil
+}
+
+func (m *mockAppRepo) GetByID(_ context.Context, id string) (*domain.Application, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	app, ok := m.apps[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return app, nil
+}
+
+func (m *mockAppRepo) List(_ context.Context, _ domain.ApplicationListFilter) ([]*domain.Application, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var res []*domain.Application
+	for _, a := range m.apps {
+		res = append(res, a)
+	}
+	return res, len(res), nil
+}
+
+func (m *mockAppRepo) Update(_ context.Context, app *domain.Application) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.apps[app.ID] = app
+	return nil
+}
+
+func (m *mockAppRepo) UpdateStage(_ context.Context, id string, stage domain.ApplicationStage, reason *string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	app, ok := m.apps[id]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	app.Stage = stage
+	app.RejectedReason = reason
+	return nil
+}
+
+func (m *mockAppRepo) Delete(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.apps, id)
+	return nil
+}
+
 func newTestRouter(db *sql.DB, apiKeyRepo domain.ApiKeyRepository, rps, burst int) http.Handler {
+	return newTestRouterWithRepos(db, apiKeyRepo, nil, nil, nil, rps, burst)
+}
+
+func newTestRouterWithRepos(db *sql.DB, apiKeyRepo domain.ApiKeyRepository, jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, strg storage.Storage, rps, burst int) http.Handler {
 	if rps <= 0 {
 		rps = 20
 	}
@@ -83,11 +248,25 @@ func newTestRouter(db *sql.DB, apiKeyRepo domain.ApiKeyRepository, rps, burst in
 		},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var jobService service.JobService
+	var appService service.ApplicationService
+	if jobRepo != nil {
+		jobService = service.NewJobService(jobRepo)
+		if appRepo != nil {
+			if strg == nil {
+				strg = storage.NewMemoryStorage()
+			}
+			appService = service.NewApplicationService(jobRepo, appRepo, strg)
+		}
+	}
+
 	return api.NewRouter(api.RouterConfig{
 		Config:     cfg,
 		Logger:     logger,
 		DB:         db,
 		ApiKeyRepo: apiKeyRepo,
+		JobService: jobService,
+		AppService: appService,
 	})
 }
 
@@ -257,4 +436,103 @@ func TestRespondErrorWithDetails(t *testing.T) {
 	require.Len(t, resp.Error.Details, 1)
 	assert.Equal(t, "resume", resp.Error.Details[0].Field)
 	assert.Equal(t, "File exceeds 10MB limit", resp.Error.Details[0].Issue)
+}
+
+func TestRouterPublicCareerEndpoints(t *testing.T) {
+	apiKeyRepo := newMockApiKeyRepo()
+	jobRepo := newMockJobRepo()
+	appRepo := newMockAppRepo()
+	strg := storage.NewMemoryStorage()
+
+	pubRaw, pubKey, err := auth.GenerateKey("Public", domain.ApiKeyScopePublic)
+	require.NoError(t, err)
+	pubKey.ID = "pub-1"
+	require.NoError(t, apiKeyRepo.Create(context.Background(), pubKey))
+
+	job := &domain.Job{
+		ID:                  "11111111-1111-1111-1111-111111111111",
+		Slug:                "backend-developer",
+		Title:               "Backend Developer",
+		Department:          "Engineering",
+		Location:            "Remote",
+		EmploymentType:      domain.EmploymentTypeFullTime,
+		DescriptionMarkdown: "We are looking for a Go developer.",
+		Status:              domain.JobStatusPublished,
+		CustomFields: []domain.CustomField{
+			{
+				ID:       "years_exp",
+				Label:    "Years of experience",
+				Type:     "number",
+				Required: true,
+			},
+		},
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, jobRepo.Create(context.Background(), job))
+
+	router := newTestRouterWithRepos(nil, apiKeyRepo, jobRepo, appRepo, strg, 20, 50)
+
+	t.Run("GET /v1/public/jobs returns list of published jobs", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/public/jobs", nil)
+		req.Header.Set("X-API-Key", pubRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp api.PaginatedResponse
+		err := json.Unmarshal(rec.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		assert.Equal(t, 1, resp.Pagination.TotalItems)
+	})
+
+	t.Run("GET /v1/public/jobs/{slug_or_id} returns job details", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/public/jobs/backend-developer", nil)
+		req.Header.Set("X-API-Key", pubRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var j domain.Job
+		err := json.Unmarshal(rec.Body.Bytes(), &j)
+		require.NoError(t, err)
+		assert.Equal(t, job.ID, j.ID)
+		assert.Equal(t, "Backend Developer", j.Title)
+	})
+
+	t.Run("GET /v1/public/departments returns active departments", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/public/departments", nil)
+		req.Header.Set("X-API-Key", pubRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var body map[string][]string
+		err := json.Unmarshal(rec.Body.Bytes(), &body)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"Engineering", "Product"}, body["departments"])
+	})
+
+	t.Run("POST /v1/public/jobs/{job_id}/apply creates application", func(t *testing.T) {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		require.NoError(t, writer.WriteField("candidate_name", "Jane Dev"))
+		require.NoError(t, writer.WriteField("candidate_email", "jane.dev@example.com"))
+		require.NoError(t, writer.WriteField("custom_answers", `{"years_exp": 4}`))
+
+		part, err := writer.CreateFormFile("resume", "jane_resume.pdf")
+		require.NoError(t, err)
+		_, err = part.Write([]byte("%PDF-1.4 Jane's resume content"))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/public/jobs/"+job.ID+"/apply", body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set("X-API-Key", pubRaw)
+
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Contains(t, rec.Header().Get("Location"), "/v1/admin/applications/")
+	})
 }

@@ -18,6 +18,8 @@ import (
 	"github.com/priyanshuguptadev/job-board/internal/config"
 	"github.com/priyanshuguptadev/job-board/internal/domain"
 	"github.com/priyanshuguptadev/job-board/internal/logger"
+	"github.com/priyanshuguptadev/job-board/internal/service"
+	"github.com/priyanshuguptadev/job-board/internal/storage"
 	"github.com/priyanshuguptadev/job-board/internal/store/postgres"
 )
 
@@ -95,10 +97,41 @@ func runServer() {
 		l.Warn("DATABASE_URL is not set; running without database connection")
 	}
 
+	var strg storage.Storage
+	if cfg.S3.Bucket != "" {
+		var err error
+		strg, err = storage.NewS3Storage(context.Background(), cfg.S3)
+		if err != nil {
+			l.Error("Failed to initialize S3 storage", "error", err)
+			os.Exit(1)
+		}
+		l.Info("S3 storage initialized", "bucket", cfg.S3.Bucket)
+	} else {
+		l.Warn("S3_BUCKET is not set; using in-memory storage")
+		strg = storage.NewMemoryStorage()
+	}
+
+	var apiKeyRepo domain.ApiKeyRepository
+	var jobRepo domain.JobRepository
+	var appRepo domain.ApplicationRepository
+	var jobService service.JobService
+	var appService service.ApplicationService
+
+	if db != nil {
+		apiKeyRepo = postgres.NewApiKeyRepository(db)
+		jobRepo = postgres.NewJobRepository(db)
+		appRepo = postgres.NewApplicationRepository(db)
+		jobService = service.NewJobService(jobRepo)
+		appService = service.NewApplicationService(jobRepo, appRepo, strg)
+	}
+
 	router := api.NewRouter(api.RouterConfig{
-		Config: cfg,
-		Logger: l,
-		DB:     db,
+		Config:     cfg,
+		Logger:     l,
+		DB:         db,
+		ApiKeyRepo: apiKeyRepo,
+		JobService: jobService,
+		AppService: appService,
 	})
 
 	srv := &http.Server{

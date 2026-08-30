@@ -8,9 +8,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/priyanshuguptadev/job-board/internal/api/middleware"
+	v1 "github.com/priyanshuguptadev/job-board/internal/api/v1"
 	"github.com/priyanshuguptadev/job-board/internal/config"
 	"github.com/priyanshuguptadev/job-board/internal/domain"
-	"github.com/priyanshuguptadev/job-board/internal/store/postgres"
+	"github.com/priyanshuguptadev/job-board/internal/service"
 )
 
 // RouterConfig contains dependencies and configuration for setting up the router.
@@ -19,17 +20,17 @@ type RouterConfig struct {
 	Logger     *slog.Logger
 	DB         *sql.DB
 	ApiKeyRepo domain.ApiKeyRepository
+	JobService service.JobService
+	AppService service.ApplicationService
 }
 
 // NewRouter initializes and returns a Chi router configured with middlewares and routes.
 func NewRouter(rc RouterConfig) *chi.Mux {
 	r := chi.NewRouter()
 
-	// Resolve API key repository if not provided but DB is available
 	apiKeyRepo := rc.ApiKeyRepo
-	if apiKeyRepo == nil && rc.DB != nil {
-		apiKeyRepo = postgres.NewApiKeyRepository(rc.DB)
-	}
+	jobService := rc.JobService
+	appService := rc.AppService
 
 	// Base middlewares
 	r.Use(chimiddleware.RequestID)
@@ -70,9 +71,9 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 	})
 
 	// API v1 Subrouter
-	r.Route("/v1", func(v1 chi.Router) {
+	r.Route("/v1", func(v1Router chi.Router) {
 		// Public routes (Rate limited + Public API Key scope)
-		v1.Route("/public", func(public chi.Router) {
+		v1Router.Route("/public", func(public chi.Router) {
 			public.Use(middleware.RateLimit(rc.Config.Server.RateLimitRPS, rc.Config.Server.RateLimitBurst))
 			if apiKeyRepo != nil {
 				public.Use(middleware.ApiKeyAuth(apiKeyRepo, domain.ApiKeyScopePublic, rc.Logger))
@@ -81,10 +82,18 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 			public.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
 				RespondJSON(w, http.StatusOK, map[string]string{"message": "pong"})
 			})
+
+			if jobService != nil && appService != nil {
+				pubHandler := v1.NewPublicHandler(jobService, appService, rc.Logger)
+				public.Get("/jobs", pubHandler.ListJobs)
+				public.Get("/jobs/{slug_or_id}", pubHandler.GetJob)
+				public.Get("/departments", pubHandler.ListDepartments)
+				public.Post("/jobs/{job_id}/apply", pubHandler.Apply)
+			}
 		})
 
 		// Admin routes (Admin API Key scope)
-		v1.Route("/admin", func(admin chi.Router) {
+		v1Router.Route("/admin", func(admin chi.Router) {
 			if apiKeyRepo != nil {
 				admin.Use(middleware.ApiKeyAuth(apiKeyRepo, domain.ApiKeyScopeAdmin, rc.Logger))
 			}
