@@ -17,13 +17,14 @@ import (
 
 // AdminHandler handles HTTP requests for administrative ATS and job management endpoints.
 type AdminHandler struct {
-	jobService service.JobService
-	appService service.ApplicationService
-	logger     *slog.Logger
+	jobService     service.JobService
+	appService     service.ApplicationService
+	webhookService service.WebhookService
+	logger         *slog.Logger
 }
 
 // NewAdminHandler creates a new AdminHandler instance.
-func NewAdminHandler(jobService service.JobService, appService service.ApplicationService, logger *slog.Logger) *AdminHandler {
+func NewAdminHandler(jobService service.JobService, appService service.ApplicationService, webhookService service.WebhookService, logger *slog.Logger) *AdminHandler {
 	if jobService == nil {
 		panic("v1: jobService is required")
 	}
@@ -31,10 +32,18 @@ func NewAdminHandler(jobService service.JobService, appService service.Applicati
 		panic("v1: appService is required")
 	}
 	return &AdminHandler{
-		jobService: jobService,
-		appService: appService,
-		logger:     logger,
+		jobService:     jobService,
+		appService:     appService,
+		webhookService: webhookService,
+		logger:         logger,
 	}
+}
+
+// CreateWebhookRequest represents the payload for registering an outbound webhook.
+type CreateWebhookRequest struct {
+	TargetURL   string   `json:"target_url"`
+	SecretToken *string  `json:"secret_token,omitempty"`
+	Events      []string `json:"events"`
 }
 
 // CreateJobRequest represents the payload for creating a new job listing.
@@ -599,4 +608,122 @@ func parseApplicationListQuery(r *http.Request) (domain.ApplicationListFilter, [
 	}
 
 	return filter, details
+}
+
+// CreateWebhook handles POST /v1/admin/webhooks.
+func (h *AdminHandler) CreateWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.webhookService == nil {
+		httputil.RespondError(w, http.StatusInternalServerError, httputil.ErrCodeInternalServerError, "Webhook service not available.")
+		return
+	}
+
+	var req CreateWebhookRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httputil.RespondError(w, http.StatusUnprocessableEntity, httputil.ErrCodeValidationError, "The provided input failed validation checks.", domain.ErrorDetail{
+			Field: "body",
+			Issue: "Invalid JSON request body",
+		})
+		return
+	}
+
+	input := service.CreateWebhookSubscriptionInput{
+		TargetURL:   req.TargetURL,
+		SecretToken: req.SecretToken,
+		Events:      req.Events,
+	}
+
+	sub, err := h.webhookService.CreateSubscription(r.Context(), input)
+	if err != nil {
+		var valErr *domain.ValidationError
+		if errors.As(err, &valErr) {
+			httputil.RespondError(w, http.StatusUnprocessableEntity, httputil.ErrCodeValidationError, "The provided input failed validation checks.", valErr.Details...)
+			return
+		}
+
+		if h.logger != nil {
+			h.logger.Error("failed to create webhook subscription", "error", err)
+		}
+		httputil.RespondError(w, http.StatusInternalServerError, httputil.ErrCodeInternalServerError, "Failed to create webhook subscription.")
+		return
+	}
+
+	w.Header().Set("Location", fmt.Sprintf("/v1/admin/webhooks/%s", sub.ID))
+	httputil.RespondJSON(w, http.StatusCreated, sub)
+}
+
+// ListWebhooks handles GET /v1/admin/webhooks.
+func (h *AdminHandler) ListWebhooks(w http.ResponseWriter, r *http.Request) {
+	if h.webhookService == nil {
+		httputil.RespondError(w, http.StatusInternalServerError, httputil.ErrCodeInternalServerError, "Webhook service not available.")
+		return
+	}
+
+	subs, err := h.webhookService.ListSubscriptions(r.Context())
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Error("failed to list webhook subscriptions", "error", err)
+		}
+		httputil.RespondError(w, http.StatusInternalServerError, httputil.ErrCodeInternalServerError, "Failed to retrieve webhook subscriptions.")
+		return
+	}
+
+	httputil.RespondJSON(w, http.StatusOK, subs)
+}
+
+// DeleteWebhook handles DELETE /v1/admin/webhooks/{id}.
+func (h *AdminHandler) DeleteWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.webhookService == nil {
+		httputil.RespondError(w, http.StatusInternalServerError, httputil.ErrCodeInternalServerError, "Webhook service not available.")
+		return
+	}
+
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		httputil.RespondError(w, http.StatusNotFound, httputil.ErrCodeNotFound, "The requested webhook subscription was not found.")
+		return
+	}
+
+	err := h.webhookService.DeleteSubscription(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			httputil.RespondError(w, http.StatusNotFound, httputil.ErrCodeNotFound, "The requested webhook subscription was not found.")
+			return
+		}
+		if h.logger != nil {
+			h.logger.Error("failed to delete webhook subscription", "id", id, "error", err)
+		}
+		httputil.RespondError(w, http.StatusInternalServerError, httputil.ErrCodeInternalServerError, "Failed to delete webhook subscription.")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// TestWebhook handles POST /v1/admin/webhooks/{id}/test.
+func (h *AdminHandler) TestWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.webhookService == nil {
+		httputil.RespondError(w, http.StatusInternalServerError, httputil.ErrCodeInternalServerError, "Webhook service not available.")
+		return
+	}
+
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		httputil.RespondError(w, http.StatusNotFound, httputil.ErrCodeNotFound, "The requested webhook subscription was not found.")
+		return
+	}
+
+	res, err := h.webhookService.TestSubscription(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			httputil.RespondError(w, http.StatusNotFound, httputil.ErrCodeNotFound, "The requested webhook subscription was not found.")
+			return
+		}
+		if h.logger != nil {
+			h.logger.Error("failed to test webhook subscription", "id", id, "error", err)
+		}
+		httputil.RespondError(w, http.StatusInternalServerError, httputil.ErrCodeInternalServerError, "Failed to execute webhook test ping.")
+		return
+	}
+
+	httputil.RespondJSON(w, http.StatusOK, res)
 }

@@ -20,10 +20,74 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupAdminTestRouter(jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, noteRepo domain.ApplicationNoteRepository, strg storage.Storage) http.Handler {
-	jobSvc := service.NewJobService(jobRepo)
-	appSvc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg)
-	h := v1.NewAdminHandler(jobSvc, appSvc, nil)
+type mockWebhookRepo struct {
+	subs map[string]*domain.WebhookSubscription
+}
+
+func newMockWebhookRepo() *mockWebhookRepo {
+	return &mockWebhookRepo{
+		subs: make(map[string]*domain.WebhookSubscription),
+	}
+}
+
+func (m *mockWebhookRepo) Create(_ context.Context, sub *domain.WebhookSubscription) error {
+	m.subs[sub.ID] = sub
+	return nil
+}
+
+func (m *mockWebhookRepo) GetByID(_ context.Context, id string) (*domain.WebhookSubscription, error) {
+	sub, ok := m.subs[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return sub, nil
+}
+
+func (m *mockWebhookRepo) List(_ context.Context) ([]*domain.WebhookSubscription, error) {
+	var list []*domain.WebhookSubscription
+	for _, s := range m.subs {
+		list = append(list, s)
+	}
+	return list, nil
+}
+
+func (m *mockWebhookRepo) ListActiveByEvent(_ context.Context, event string) ([]*domain.WebhookSubscription, error) {
+	var list []*domain.WebhookSubscription
+	for _, s := range m.subs {
+		if !s.IsActive {
+			continue
+		}
+		for _, e := range s.Events {
+			if e == "*" || e == event {
+				list = append(list, s)
+				break
+			}
+		}
+	}
+	return list, nil
+}
+
+func (m *mockWebhookRepo) Update(_ context.Context, sub *domain.WebhookSubscription) error {
+	m.subs[sub.ID] = sub
+	return nil
+}
+
+func (m *mockWebhookRepo) Delete(_ context.Context, id string) error {
+	if _, ok := m.subs[id]; !ok {
+		return domain.ErrNotFound
+	}
+	delete(m.subs, id)
+	return nil
+}
+
+func setupAdminTestRouter(jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, noteRepo domain.ApplicationNoteRepository, webhookRepo domain.WebhookSubscriptionRepository, strg storage.Storage) http.Handler {
+	if webhookRepo == nil {
+		webhookRepo = newMockWebhookRepo()
+	}
+	webhookSvc := service.NewWebhookService(webhookRepo, nil)
+	jobSvc := service.NewJobService(jobRepo, webhookSvc)
+	appSvc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg, webhookSvc)
+	h := v1.NewAdminHandler(jobSvc, appSvc, webhookSvc, nil)
 
 	r := chi.NewRouter()
 	r.Route("/v1/admin", func(admin chi.Router) {
@@ -39,6 +103,11 @@ func setupAdminTestRouter(jobRepo domain.JobRepository, appRepo domain.Applicati
 		admin.Patch("/applications/{id}/stage", h.UpdateStage)
 		admin.Post("/applications/{id}/notes", h.CreateNote)
 		admin.Get("/applications/{id}/notes", h.ListNotes)
+
+		admin.Post("/webhooks", h.CreateWebhook)
+		admin.Get("/webhooks", h.ListWebhooks)
+		admin.Delete("/webhooks/{id}", h.DeleteWebhook)
+		admin.Post("/webhooks/{id}/test", h.TestWebhook)
 	})
 	return r
 }
@@ -49,7 +118,7 @@ func TestAdminHandler_JobManagement(t *testing.T) {
 	noteRepo := newMockNoteRepo()
 	strg := storage.NewMemoryStorage()
 
-	router := setupAdminTestRouter(jobRepo, appRepo, noteRepo, strg)
+	router := setupAdminTestRouter(jobRepo, appRepo, noteRepo, nil, strg)
 
 	t.Run("POST /v1/admin/jobs creates job successfully", func(t *testing.T) {
 		min := 110000.0
@@ -325,7 +394,7 @@ func TestAdminHandler_CandidatePipelineAndNotes(t *testing.T) {
 	require.NoError(t, appRepo.Create(context.Background(), app1))
 	require.NoError(t, strg.Upload(context.Background(), app1.ResumeS3Key, bytes.NewReader(sampleValidPDF()), int64(len(sampleValidPDF())), "application/pdf"))
 
-	router := setupAdminTestRouter(jobRepo, appRepo, noteRepo, strg)
+	router := setupAdminTestRouter(jobRepo, appRepo, noteRepo, nil, strg)
 
 	t.Run("GET /v1/admin/jobs/{id}/applications lists candidate applications", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/admin/jobs/job-400/applications", nil)
@@ -523,6 +592,115 @@ func TestAdminHandler_CandidatePipelineAndNotes(t *testing.T) {
 
 	t.Run("GET /v1/admin/applications/{id}/notes returns 404 for non-existent application", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/admin/applications/non-existent-app/notes", nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+}
+
+func TestAdminHandler_WebhookManagement(t *testing.T) {
+	jobRepo := newMockJobRepo()
+	appRepo := newMockAppRepo()
+	noteRepo := newMockNoteRepo()
+	webhookRepo := newMockWebhookRepo()
+	strg := storage.NewMemoryStorage()
+
+	router := setupAdminTestRouter(jobRepo, appRepo, noteRepo, webhookRepo, strg)
+
+	var createdSubID string
+
+	t.Run("POST /v1/admin/webhooks creates webhook subscription", func(t *testing.T) {
+		reqBody := v1.CreateWebhookRequest{
+			TargetURL: "https://example.com/webhook",
+			Events:    []string{domain.EventJobPublished, domain.EventApplicationCreated},
+		}
+		bodyBytes, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/admin/webhooks", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Contains(t, rec.Header().Get("Location"), "/v1/admin/webhooks/")
+
+		var sub domain.WebhookSubscription
+		err = json.Unmarshal(rec.Body.Bytes(), &sub)
+		require.NoError(t, err)
+
+		assert.NotEmpty(t, sub.ID)
+		assert.Equal(t, "https://example.com/webhook", sub.TargetURL)
+		assert.True(t, strings.HasPrefix(sub.SecretToken, "whsec_"))
+		assert.True(t, sub.IsActive)
+		assert.ElementsMatch(t, []string{domain.EventJobPublished, domain.EventApplicationCreated}, sub.Events)
+
+		createdSubID = sub.ID
+	})
+
+	t.Run("POST /v1/admin/webhooks returns 422 on validation failure", func(t *testing.T) {
+		reqBody := v1.CreateWebhookRequest{
+			TargetURL: "invalid-url",
+			Events:    []string{},
+		}
+		bodyBytes, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/admin/webhooks", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		var errResp api.ErrorResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &errResp)
+		require.NoError(t, err)
+		assert.Equal(t, api.ErrCodeValidationError, errResp.Error.Code)
+	})
+
+	t.Run("GET /v1/admin/webhooks lists all subscriptions", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/admin/webhooks", nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var subs []domain.WebhookSubscription
+		err := json.Unmarshal(rec.Body.Bytes(), &subs)
+		require.NoError(t, err)
+
+		assert.Len(t, subs, 1)
+		assert.Equal(t, createdSubID, subs[0].ID)
+	})
+
+	t.Run("POST /v1/admin/webhooks/{id}/test returns 404 for non-existent webhook", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/admin/webhooks/non-existent/test", nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("DELETE /v1/admin/webhooks/{id} deletes subscription", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/v1/admin/webhooks/"+createdSubID, nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+
+		// Verify deleted
+		_, err := webhookRepo.GetByID(context.Background(), createdSubID)
+		assert.ErrorIs(t, err, domain.ErrNotFound)
+	})
+
+	t.Run("DELETE /v1/admin/webhooks/{id} returns 404 for non-existent subscription", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/v1/admin/webhooks/non-existent", nil)
 		rec := httptest.NewRecorder()
 
 		router.ServeHTTP(rec, req)

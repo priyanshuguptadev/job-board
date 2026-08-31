@@ -153,7 +153,7 @@ func TestApplicationService_Apply(t *testing.T) {
 	}
 	require.NoError(t, jobRepo.Create(context.Background(), job))
 
-	svc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg)
+	svc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg, nil)
 
 	t.Run("successful application submission", func(t *testing.T) {
 		pdfContent := sampleValidPDF()
@@ -313,7 +313,7 @@ func TestApplicationService_CandidatePipeline(t *testing.T) {
 	require.NoError(t, appRepo.Create(context.Background(), app))
 	require.NoError(t, strg.Upload(context.Background(), app.ResumeS3Key, bytes.NewReader(sampleValidPDF()), int64(len(sampleValidPDF())), "application/pdf"))
 
-	svc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg)
+	svc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg, nil)
 
 	t.Run("ListApplications returns applications for job", func(t *testing.T) {
 		apps, total, err := svc.ListApplications(context.Background(), domain.ApplicationListFilter{
@@ -361,5 +361,86 @@ func TestApplicationService_CandidatePipeline(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, notes, 1)
 		assert.Equal(t, "Great interview round 1", notes[0].NoteText)
+	})
+}
+
+type mockEventDispatcher struct {
+	events []string
+}
+
+func (m *mockEventDispatcher) CreateSubscription(_ context.Context, _ service.CreateWebhookSubscriptionInput) (*domain.WebhookSubscription, error) {
+	return nil, nil
+}
+func (m *mockEventDispatcher) GetSubscription(_ context.Context, _ string) (*domain.WebhookSubscription, error) {
+	return nil, nil
+}
+func (m *mockEventDispatcher) ListSubscriptions(_ context.Context) ([]*domain.WebhookSubscription, error) {
+	return nil, nil
+}
+func (m *mockEventDispatcher) DeleteSubscription(_ context.Context, _ string) error {
+	return nil
+}
+func (m *mockEventDispatcher) TestSubscription(_ context.Context, _ string) (*service.WebhookTestResult, error) {
+	return nil, nil
+}
+func (m *mockEventDispatcher) DispatchEvent(_ context.Context, event string, _ interface{}) error {
+	m.events = append(m.events, event)
+	return nil
+}
+
+func TestApplicationService_EventDispatching(t *testing.T) {
+	jobRepo := newMockJobRepo()
+	appRepo := newMockAppRepo()
+	noteRepo := newMockNoteRepo()
+	strg := storage.NewMemoryStorage()
+	mockWS := &mockEventDispatcher{}
+
+	job := &domain.Job{
+		ID:         "job-event-1",
+		Slug:       "backend-lead",
+		Title:      "Backend Lead",
+		Department: "Engineering",
+		Status:     domain.JobStatusPublished,
+		CreatedAt:  time.Now(),
+	}
+	require.NoError(t, jobRepo.Create(context.Background(), job))
+
+	svc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg, mockWS)
+
+	var appID string
+	t.Run("Apply dispatches application.created", func(t *testing.T) {
+		pdf := sampleValidPDF()
+		app, err := svc.Apply(context.Background(), service.ApplyInput{
+			JobIDOrSlug:    job.ID,
+			CandidateName:  "Bruce Wayne",
+			CandidateEmail: "bruce@wayne.com",
+			ResumeFilename: "resume.pdf",
+			ResumeSize:     int64(len(pdf)),
+			ResumeReader:   bytes.NewReader(pdf),
+		})
+		require.NoError(t, err)
+		assert.Contains(t, mockWS.events, domain.EventApplicationCreated)
+		appID = app.ID
+	})
+
+	t.Run("UpdateStage dispatches application.stage_updated", func(t *testing.T) {
+		mockWS.events = nil
+		_, err := svc.UpdateStage(context.Background(), appID, service.UpdateStageInput{
+			Stage: domain.ApplicationStageInterviewing,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, mockWS.events, domain.EventApplicationStageUpdated)
+	})
+
+	t.Run("UpdateStage with rejected dispatches application.rejected", func(t *testing.T) {
+		mockWS.events = nil
+		reason := "Declined offer"
+		_, err := svc.UpdateStage(context.Background(), appID, service.UpdateStageInput{
+			Stage:          domain.ApplicationStageRejected,
+			RejectedReason: &reason,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, mockWS.events, domain.EventApplicationStageUpdated)
+		assert.Contains(t, mockWS.events, domain.EventApplicationRejected)
 	})
 }
