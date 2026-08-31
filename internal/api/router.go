@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/priyanshuguptadev/job-board/docs"
 	"github.com/priyanshuguptadev/job-board/internal/api/middleware"
 	v1 "github.com/priyanshuguptadev/job-board/internal/api/v1"
 	"github.com/priyanshuguptadev/job-board/internal/config"
@@ -70,6 +71,25 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 			"status":   status,
 			"database": dbStatus,
 		})
+	})
+
+	// OpenAPI Spec & Swagger UI Documentation
+	r.Get("/openapi.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(docs.OpenAPISpec)
+	})
+
+	r.Get("/docs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(docs.SwaggerUIHTML))
+	})
+
+	r.Get("/docs/*", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(docs.SwaggerUIHTML))
 	})
 
 	// API v1 Subrouter
