@@ -70,6 +70,48 @@ func (m *mockAppRepo) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+type mockNoteRepo struct {
+	notes map[string][]*domain.ApplicationNote
+}
+
+func newMockNoteRepo() *mockNoteRepo {
+	return &mockNoteRepo{
+		notes: make(map[string][]*domain.ApplicationNote),
+	}
+}
+
+func (m *mockNoteRepo) Create(_ context.Context, note *domain.ApplicationNote) error {
+	m.notes[note.ApplicationID] = append(m.notes[note.ApplicationID], note)
+	return nil
+}
+
+func (m *mockNoteRepo) GetByID(_ context.Context, id string) (*domain.ApplicationNote, error) {
+	for _, notes := range m.notes {
+		for _, n := range notes {
+			if n.ID == id {
+				return n, nil
+			}
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (m *mockNoteRepo) ListByApplicationID(_ context.Context, appID string) ([]*domain.ApplicationNote, error) {
+	return m.notes[appID], nil
+}
+
+func (m *mockNoteRepo) Delete(_ context.Context, id string) error {
+	for appID, notes := range m.notes {
+		for i, n := range notes {
+			if n.ID == id {
+				m.notes[appID] = append(notes[:i], notes[i+1:]...)
+				return nil
+			}
+		}
+	}
+	return domain.ErrNotFound
+}
+
 func sampleValidPDF() []byte {
 	return []byte("%PDF-1.4 sample pdf content for unit testing")
 }
@@ -77,6 +119,7 @@ func sampleValidPDF() []byte {
 func TestApplicationService_Apply(t *testing.T) {
 	jobRepo := newMockJobRepo()
 	appRepo := newMockAppRepo()
+	noteRepo := newMockNoteRepo()
 	strg := storage.NewMemoryStorage()
 
 	job := &domain.Job{
@@ -110,7 +153,7 @@ func TestApplicationService_Apply(t *testing.T) {
 	}
 	require.NoError(t, jobRepo.Create(context.Background(), job))
 
-	svc := service.NewApplicationService(jobRepo, appRepo, strg)
+	svc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg)
 
 	t.Run("successful application submission", func(t *testing.T) {
 		pdfContent := sampleValidPDF()
@@ -238,5 +281,85 @@ func TestApplicationService_Apply(t *testing.T) {
 
 		_, err := svc.Apply(context.Background(), input)
 		assert.ErrorIs(t, err, domain.ErrNotFound)
+	})
+}
+
+func TestApplicationService_CandidatePipeline(t *testing.T) {
+	jobRepo := newMockJobRepo()
+	appRepo := newMockAppRepo()
+	noteRepo := newMockNoteRepo()
+	strg := storage.NewMemoryStorage()
+
+	job := &domain.Job{
+		ID:         "11111111-1111-1111-1111-111111111111",
+		Slug:       "backend-engineer",
+		Title:      "Backend Engineer",
+		Department: "Engineering",
+		Status:     domain.JobStatusPublished,
+		CreatedAt:  time.Now(),
+	}
+	require.NoError(t, jobRepo.Create(context.Background(), job))
+
+	app := &domain.Application{
+		ID:             "app-1",
+		JobID:          job.ID,
+		CandidateName:  "Alice",
+		CandidateEmail: "alice@example.com",
+		ResumeS3Key:    "resumes/app-1/resume.pdf",
+		ResumeFilename: "resume.pdf",
+		Stage:          domain.ApplicationStageApplied,
+		CreatedAt:      time.Now(),
+	}
+	require.NoError(t, appRepo.Create(context.Background(), app))
+	require.NoError(t, strg.Upload(context.Background(), app.ResumeS3Key, bytes.NewReader(sampleValidPDF()), int64(len(sampleValidPDF())), "application/pdf"))
+
+	svc := service.NewApplicationService(jobRepo, appRepo, noteRepo, strg)
+
+	t.Run("ListApplications returns applications for job", func(t *testing.T) {
+		apps, total, err := svc.ListApplications(context.Background(), domain.ApplicationListFilter{
+			JobID: job.ID,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, total)
+		require.Len(t, apps, 1)
+		assert.Equal(t, "Alice", apps[0].CandidateName)
+	})
+
+	t.Run("GetApplication retrieves single application", func(t *testing.T) {
+		got, err := svc.GetApplication(context.Background(), "app-1")
+		require.NoError(t, err)
+		assert.Equal(t, "Alice", got.CandidateName)
+	})
+
+	t.Run("GetResumeDownloadURL returns presigned URL", func(t *testing.T) {
+		res, err := svc.GetResumeDownloadURL(context.Background(), "app-1")
+		require.NoError(t, err)
+		assert.NotEmpty(t, res.URL)
+		assert.Equal(t, "resume.pdf", res.Filename)
+		assert.Equal(t, int64(900), res.ExpiresInSeconds)
+	})
+
+	t.Run("UpdateStage transitions stage", func(t *testing.T) {
+		updated, err := svc.UpdateStage(context.Background(), "app-1", service.UpdateStageInput{
+			Stage: domain.ApplicationStageInterviewing,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, domain.ApplicationStageInterviewing, updated.Stage)
+	})
+
+	t.Run("CreateNote and ListNotes", func(t *testing.T) {
+		note, err := svc.CreateNote(context.Background(), "app-1", service.CreateNoteInput{
+			AuthorName: "Hiring Manager",
+			NoteText:   "Great interview round 1",
+		})
+		require.NoError(t, err)
+		assert.NotEmpty(t, note.ID)
+		assert.Equal(t, "app-1", note.ApplicationID)
+		assert.Equal(t, "Hiring Manager", note.AuthorName)
+
+		notes, err := svc.ListNotes(context.Background(), "app-1")
+		require.NoError(t, err)
+		require.Len(t, notes, 1)
+		assert.Equal(t, "Great interview round 1", notes[0].NoteText)
 	})
 }

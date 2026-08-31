@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"time"
 
 	"github.com/priyanshuguptadev/job-board/internal/domain"
 	"github.com/priyanshuguptadev/job-board/internal/storage"
@@ -24,23 +26,53 @@ type ApplyInput struct {
 	CustomAnswers           map[string]interface{}
 }
 
+// UpdateStageInput contains stage update parameters.
+type UpdateStageInput struct {
+	Stage          domain.ApplicationStage
+	RejectedReason *string
+}
+
+// CreateNoteInput contains review note parameters.
+type CreateNoteInput struct {
+	AuthorName string
+	NoteText   string
+}
+
+// ResumeDownloadResult contains presigned download information for a candidate's resume.
+type ResumeDownloadResult struct {
+	URL              string `json:"url"`
+	Filename         string `json:"filename"`
+	ExpiresInSeconds int64  `json:"expires_in_seconds"`
+}
+
 // ApplicationService defines business operations for managing candidate applications.
 type ApplicationService interface {
+	// Public
 	Apply(ctx context.Context, input ApplyInput) (*domain.Application, error)
+
+	// Admin candidate & pipeline
+	ListApplications(ctx context.Context, filter domain.ApplicationListFilter) ([]*domain.Application, int, error)
+	GetApplication(ctx context.Context, id string) (*domain.Application, error)
+	GetResumeDownloadURL(ctx context.Context, id string) (*ResumeDownloadResult, error)
+	UpdateStage(ctx context.Context, id string, input UpdateStageInput) (*domain.Application, error)
+	CreateNote(ctx context.Context, appID string, input CreateNoteInput) (*domain.ApplicationNote, error)
+	ListNotes(ctx context.Context, appID string) ([]*domain.ApplicationNote, error)
 }
 
 type applicationService struct {
-	jobRepo domain.JobRepository
-	appRepo domain.ApplicationRepository
-	storage storage.Storage
+	jobRepo  domain.JobRepository
+	appRepo  domain.ApplicationRepository
+	noteRepo domain.ApplicationNoteRepository
+	storage  storage.Storage
 }
 
 // NewApplicationService creates a new ApplicationService instance.
-func NewApplicationService(jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, strg storage.Storage) ApplicationService {
+func NewApplicationService(jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, noteRepo domain.ApplicationNoteRepository, strg storage.Storage) ApplicationService {
 	return &applicationService{
-		jobRepo: jobRepo,
-		appRepo: appRepo,
-		storage: strg,
+		jobRepo:  jobRepo,
+		appRepo:  appRepo,
+		noteRepo: noteRepo,
+		storage:  strg,
 	}
 }
 
@@ -150,4 +182,143 @@ func (s *applicationService) Apply(ctx context.Context, input ApplyInput) (*doma
 	}
 
 	return app, nil
+}
+
+// ListApplications retrieves candidate applications matching the filter.
+func (s *applicationService) ListApplications(ctx context.Context, filter domain.ApplicationListFilter) ([]*domain.Application, int, error) {
+	if filter.JobID != "" {
+		if _, err := s.jobRepo.GetByIDOrSlug(ctx, filter.JobID); err != nil {
+			return nil, 0, err
+		}
+	}
+
+	if filter.Page < 1 {
+		filter.Page = 1
+	}
+	if filter.Limit < 1 {
+		filter.Limit = 20
+	} else if filter.Limit > 100 {
+		filter.Limit = 100
+	}
+
+	apps, total, err := s.appRepo.List(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	if apps == nil {
+		apps = []*domain.Application{}
+	}
+	return apps, total, nil
+}
+
+// GetApplication retrieves an application by ID.
+func (s *applicationService) GetApplication(ctx context.Context, id string) (*domain.Application, error) {
+	app, err := s.appRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if app == nil {
+		return nil, domain.ErrNotFound
+	}
+	return app, nil
+}
+
+// GetResumeDownloadURL generates a presigned download URL for a candidate's resume attachment.
+func (s *applicationService) GetResumeDownloadURL(ctx context.Context, id string) (*ResumeDownloadResult, error) {
+	app, err := s.appRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if app == nil {
+		return nil, domain.ErrNotFound
+	}
+
+	if s.storage == nil {
+		return nil, errors.New("storage client not configured")
+	}
+
+	expiry := 15 * time.Minute
+	url, err := s.storage.GetPresignedURL(ctx, app.ResumeS3Key, expiry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate presigned url: %w", err)
+	}
+
+	return &ResumeDownloadResult{
+		URL:              url,
+		Filename:         app.ResumeFilename,
+		ExpiresInSeconds: int64(expiry.Seconds()),
+	}, nil
+}
+
+// UpdateStage updates the hiring pipeline stage of an application.
+func (s *applicationService) UpdateStage(ctx context.Context, id string, input UpdateStageInput) (*domain.Application, error) {
+	app, err := s.appRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if app == nil {
+		return nil, domain.ErrNotFound
+	}
+
+	details := domain.ValidateStageUpdate(input.Stage, input.RejectedReason)
+	if len(details) > 0 {
+		return nil, &domain.ValidationError{
+			Message: "The provided input failed validation checks.",
+			Details: details,
+		}
+	}
+
+	if err := s.appRepo.UpdateStage(ctx, id, input.Stage, input.RejectedReason); err != nil {
+		return nil, err
+	}
+
+	app.Stage = input.Stage
+	app.RejectedReason = input.RejectedReason
+	app.UpdatedAt = time.Now().UTC()
+
+	return app, nil
+}
+
+// CreateNote adds an internal review note to a candidate application.
+func (s *applicationService) CreateNote(ctx context.Context, appID string, input CreateNoteInput) (*domain.ApplicationNote, error) {
+	if _, err := s.appRepo.GetByID(ctx, appID); err != nil {
+		return nil, err
+	}
+
+	details := domain.ValidateNoteInput(input.AuthorName, input.NoteText)
+	if len(details) > 0 {
+		return nil, &domain.ValidationError{
+			Message: "The provided input failed validation checks.",
+			Details: details,
+		}
+	}
+
+	note := &domain.ApplicationNote{
+		ID:            domain.NewID(),
+		ApplicationID: appID,
+		AuthorName:    strings.TrimSpace(input.AuthorName),
+		NoteText:      strings.TrimSpace(input.NoteText),
+	}
+
+	if err := s.noteRepo.Create(ctx, note); err != nil {
+		return nil, err
+	}
+
+	return note, nil
+}
+
+// ListNotes retrieves all internal review notes for an application.
+func (s *applicationService) ListNotes(ctx context.Context, appID string) ([]*domain.ApplicationNote, error) {
+	if _, err := s.appRepo.GetByID(ctx, appID); err != nil {
+		return nil, err
+	}
+
+	notes, err := s.noteRepo.ListByApplicationID(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	if notes == nil {
+		notes = []*domain.ApplicationNote{}
+	}
+	return notes, nil
 }

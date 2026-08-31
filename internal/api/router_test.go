@@ -158,6 +158,9 @@ func (m *mockJobRepo) Update(_ context.Context, job *domain.Job) error {
 func (m *mockJobRepo) Delete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, ok := m.jobs[id]; !ok {
+		return domain.ErrNotFound
+	}
 	delete(m.jobs, id)
 	return nil
 }
@@ -226,6 +229,57 @@ func (m *mockAppRepo) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+type mockNoteRepo struct {
+	mu    sync.Mutex
+	notes map[string][]*domain.ApplicationNote
+}
+
+func newMockNoteRepo() *mockNoteRepo {
+	return &mockNoteRepo{
+		notes: make(map[string][]*domain.ApplicationNote),
+	}
+}
+
+func (m *mockNoteRepo) Create(_ context.Context, note *domain.ApplicationNote) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.notes[note.ApplicationID] = append(m.notes[note.ApplicationID], note)
+	return nil
+}
+
+func (m *mockNoteRepo) GetByID(_ context.Context, id string) (*domain.ApplicationNote, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, notes := range m.notes {
+		for _, n := range notes {
+			if n.ID == id {
+				return n, nil
+			}
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (m *mockNoteRepo) ListByApplicationID(_ context.Context, appID string) ([]*domain.ApplicationNote, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.notes[appID], nil
+}
+
+func (m *mockNoteRepo) Delete(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for appID, notes := range m.notes {
+		for i, n := range notes {
+			if n.ID == id {
+				m.notes[appID] = append(notes[:i], notes[i+1:]...)
+				return nil
+			}
+		}
+	}
+	return domain.ErrNotFound
+}
+
 func newTestRouter(db *sql.DB, apiKeyRepo domain.ApiKeyRepository, rps, burst int) http.Handler {
 	return newTestRouterWithRepos(db, apiKeyRepo, nil, nil, nil, rps, burst)
 }
@@ -256,7 +310,7 @@ func newTestRouterWithRepos(db *sql.DB, apiKeyRepo domain.ApiKeyRepository, jobR
 			if strg == nil {
 				strg = storage.NewMemoryStorage()
 			}
-			appService = service.NewApplicationService(jobRepo, appRepo, strg)
+			appService = service.NewApplicationService(jobRepo, appRepo, newMockNoteRepo(), strg)
 		}
 	}
 
@@ -534,5 +588,180 @@ func TestRouterPublicCareerEndpoints(t *testing.T) {
 
 		assert.Equal(t, http.StatusCreated, rec.Code)
 		assert.Contains(t, rec.Header().Get("Location"), "/v1/admin/applications/")
+	})
+}
+
+func TestRouterAdminEndpoints(t *testing.T) {
+	apiKeyRepo := newMockApiKeyRepo()
+	jobRepo := newMockJobRepo()
+	appRepo := newMockAppRepo()
+	strg := storage.NewMemoryStorage()
+
+	adminRaw, adminKey, err := auth.GenerateKey("Admin Key", domain.ApiKeyScopeAdmin)
+	require.NoError(t, err)
+	adminKey.ID = "admin-key-1"
+	require.NoError(t, apiKeyRepo.Create(context.Background(), adminKey))
+
+	pubRaw, pubKey, err := auth.GenerateKey("Public Key", domain.ApiKeyScopePublic)
+	require.NoError(t, err)
+	pubKey.ID = "pub-key-1"
+	require.NoError(t, apiKeyRepo.Create(context.Background(), pubKey))
+
+	router := newTestRouterWithRepos(nil, apiKeyRepo, jobRepo, appRepo, strg, 20, 50)
+
+	var createdJobID string
+
+	t.Run("POST /v1/admin/jobs creates job with admin auth", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"title":                "Staff Go Engineer",
+			"department":           "Engineering",
+			"location":             "Remote",
+			"description_markdown": "Staff role",
+			"status":               "draft",
+		}
+		bodyBytes, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/admin/jobs", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", adminRaw)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Contains(t, rec.Header().Get("Location"), "/v1/admin/jobs/")
+
+		var job domain.Job
+		err = json.Unmarshal(rec.Body.Bytes(), &job)
+		require.NoError(t, err)
+		assert.Equal(t, "Staff Go Engineer", job.Title)
+		assert.NotEmpty(t, job.ID)
+		createdJobID = job.ID
+	})
+
+	t.Run("POST /v1/admin/jobs returns 403 Forbidden with public key", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"title":                "Unauthorized Role",
+			"department":           "Engineering",
+			"location":             "Remote",
+			"description_markdown": "Unauthorized",
+		}
+		bodyBytes, _ := json.Marshal(reqBody)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/admin/jobs", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", pubRaw)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("GET /v1/admin/jobs returns list of all jobs", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/admin/jobs", nil)
+		req.Header.Set("X-API-Key", adminRaw)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp api.PaginatedResponse
+		err := json.Unmarshal(rec.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, resp.Pagination.TotalItems, 1)
+	})
+
+	t.Run("PATCH /v1/admin/jobs/{id} updates job", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"status": "published",
+		}
+		bodyBytes, _ := json.Marshal(reqBody)
+
+		req := httptest.NewRequest(http.MethodPatch, "/v1/admin/jobs/"+createdJobID, bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", adminRaw)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var job domain.Job
+		err := json.Unmarshal(rec.Body.Bytes(), &job)
+		require.NoError(t, err)
+		assert.Equal(t, domain.JobStatusPublished, job.Status)
+	})
+
+	var createdAppID string
+
+	t.Run("Create application and test admin candidate management pipeline", func(t *testing.T) {
+		app := &domain.Application{
+			ID:             "app-admin-test-1",
+			JobID:          createdJobID,
+			CandidateName:  "Test Candidate",
+			CandidateEmail: "candidate@test.com",
+			ResumeS3Key:    "resumes/app-admin-test-1/resume.pdf",
+			ResumeFilename: "resume.pdf",
+			Stage:          domain.ApplicationStageApplied,
+			CreatedAt:      time.Now(),
+		}
+		require.NoError(t, appRepo.Create(context.Background(), app))
+		require.NoError(t, strg.Upload(context.Background(), app.ResumeS3Key, strings.NewReader("pdf-content"), 11, "application/pdf"))
+		createdAppID = app.ID
+
+		// GET /v1/admin/jobs/{id}/applications
+		req := httptest.NewRequest(http.MethodGet, "/v1/admin/jobs/"+createdJobID+"/applications", nil)
+		req.Header.Set("X-API-Key", adminRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		// GET /v1/admin/applications/{id}
+		req = httptest.NewRequest(http.MethodGet, "/v1/admin/applications/"+createdAppID, nil)
+		req.Header.Set("X-API-Key", adminRaw)
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		// GET /v1/admin/applications/{id}/resume
+		req = httptest.NewRequest(http.MethodGet, "/v1/admin/applications/"+createdAppID+"/resume", nil)
+		req.Header.Set("X-API-Key", adminRaw)
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		// PATCH /v1/admin/applications/{id}/stage
+		stageBody, _ := json.Marshal(map[string]interface{}{"stage": "interviewing"})
+		req = httptest.NewRequest(http.MethodPatch, "/v1/admin/applications/"+createdAppID+"/stage", bytes.NewReader(stageBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", adminRaw)
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		// POST /v1/admin/applications/{id}/notes
+		noteBody, _ := json.Marshal(map[string]interface{}{"author_name": "Reviewer", "note_text": "Strong communication"})
+		req = httptest.NewRequest(http.MethodPost, "/v1/admin/applications/"+createdAppID+"/notes", bytes.NewReader(noteBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", adminRaw)
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusCreated, rec.Code)
+
+		// GET /v1/admin/applications/{id}/notes
+		req = httptest.NewRequest(http.MethodGet, "/v1/admin/applications/"+createdAppID+"/notes", nil)
+		req.Header.Set("X-API-Key", adminRaw)
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("DELETE /v1/admin/jobs/{id} deletes job", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/v1/admin/jobs/"+createdJobID, nil)
+		req.Header.Set("X-API-Key", adminRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
 	})
 }

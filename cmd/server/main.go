@@ -114,6 +114,7 @@ func runServer() {
 	var apiKeyRepo domain.ApiKeyRepository
 	var jobRepo domain.JobRepository
 	var appRepo domain.ApplicationRepository
+	var appNoteRepo domain.ApplicationNoteRepository
 	var jobService service.JobService
 	var appService service.ApplicationService
 
@@ -121,8 +122,9 @@ func runServer() {
 		apiKeyRepo = postgres.NewApiKeyRepository(db)
 		jobRepo = postgres.NewJobRepository(db)
 		appRepo = postgres.NewApplicationRepository(db)
+		appNoteRepo = postgres.NewApplicationNoteRepository(db)
 		jobService = service.NewJobService(jobRepo)
-		appService = service.NewApplicationService(jobRepo, appRepo, strg)
+		appService = service.NewApplicationService(jobRepo, appRepo, appNoteRepo, strg)
 	}
 
 	router := api.NewRouter(api.RouterConfig{

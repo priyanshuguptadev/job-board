@@ -95,6 +95,9 @@ func (m *mockJobRepo) Update(_ context.Context, job *domain.Job) error {
 }
 
 func (m *mockJobRepo) Delete(_ context.Context, id string) error {
+	if _, ok := m.jobs[id]; !ok {
+		return domain.ErrNotFound
+	}
 	delete(m.jobs, id)
 	return nil
 }
@@ -150,9 +153,51 @@ func (m *mockAppRepo) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+type mockNoteRepo struct {
+	notes map[string][]*domain.ApplicationNote
+}
+
+func newMockNoteRepo() *mockNoteRepo {
+	return &mockNoteRepo{
+		notes: make(map[string][]*domain.ApplicationNote),
+	}
+}
+
+func (m *mockNoteRepo) Create(_ context.Context, note *domain.ApplicationNote) error {
+	m.notes[note.ApplicationID] = append(m.notes[note.ApplicationID], note)
+	return nil
+}
+
+func (m *mockNoteRepo) GetByID(_ context.Context, id string) (*domain.ApplicationNote, error) {
+	for _, notes := range m.notes {
+		for _, n := range notes {
+			if n.ID == id {
+				return n, nil
+			}
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (m *mockNoteRepo) ListByApplicationID(_ context.Context, appID string) ([]*domain.ApplicationNote, error) {
+	return m.notes[appID], nil
+}
+
+func (m *mockNoteRepo) Delete(_ context.Context, id string) error {
+	for appID, notes := range m.notes {
+		for i, n := range notes {
+			if n.ID == id {
+				m.notes[appID] = append(notes[:i], notes[i+1:]...)
+				return nil
+			}
+		}
+	}
+	return domain.ErrNotFound
+}
+
 func setupPublicTestRouter(jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, strg storage.Storage) http.Handler {
 	jobSvc := service.NewJobService(jobRepo)
-	appSvc := service.NewApplicationService(jobRepo, appRepo, strg)
+	appSvc := service.NewApplicationService(jobRepo, appRepo, newMockNoteRepo(), strg)
 	h := v1.NewPublicHandler(jobSvc, appSvc, nil)
 
 	r := chi.NewRouter()
