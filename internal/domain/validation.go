@@ -215,3 +215,310 @@ func IsValidOption(val interface{}, options []string) bool {
 	}
 	return false
 }
+
+var slugRegex = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var customFieldIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// IsValidSlug verifies if a slug is url-safe lowercase alphanumeric with hyphens.
+func IsValidSlug(slug string) bool {
+	if len(slug) == 0 || len(slug) > 255 {
+		return false
+	}
+	return slugRegex.MatchString(slug)
+}
+
+// GenerateSlug generates a clean, URL-safe slug from a title string.
+func GenerateSlug(title string) string {
+	lower := strings.ToLower(strings.TrimSpace(title))
+	var b strings.Builder
+	lastHyphen := false
+	for _, r := range lower {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastHyphen = false
+		} else if !lastHyphen && b.Len() > 0 {
+			b.WriteRune('-')
+			lastHyphen = true
+		}
+	}
+	res := strings.Trim(b.String(), "-")
+	if res == "" {
+		return "job"
+	}
+	if len(res) > 255 {
+		res = res[:255]
+		res = strings.TrimRight(res, "-")
+	}
+	return res
+}
+
+// IsValidEmploymentType checks if the employment type is one of the valid enum values.
+func IsValidEmploymentType(empType EmploymentType) bool {
+	switch empType {
+	case EmploymentTypeFullTime, EmploymentTypePartTime, EmploymentTypeContract, EmploymentTypeInternship:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsValidJobStatus checks if the status is one of the valid enum values.
+func IsValidJobStatus(status JobStatus) bool {
+	switch status {
+	case JobStatusDraft, JobStatusPublished, JobStatusArchived:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsValidStage checks if the stage is one of the valid enum values.
+func IsValidStage(stage ApplicationStage) bool {
+	switch stage {
+	case ApplicationStageApplied, ApplicationStageScreening, ApplicationStageInterviewing,
+		ApplicationStageOffer, ApplicationStageHired, ApplicationStageRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateCustomFields checks custom question field definitions.
+func ValidateCustomFields(fields []CustomField) []ErrorDetail {
+	var details []ErrorDetail
+	seenIDs := make(map[string]bool)
+
+	for i, field := range fields {
+		fieldPrefix := fmt.Sprintf("custom_fields[%d]", i)
+		trimmedID := strings.TrimSpace(field.ID)
+		if trimmedID == "" {
+			details = append(details, ErrorDetail{
+				Field: fmt.Sprintf("%s.id", fieldPrefix),
+				Issue: "Custom field id is required",
+			})
+		} else if !customFieldIDRegex.MatchString(trimmedID) {
+			details = append(details, ErrorDetail{
+				Field: fmt.Sprintf("%s.id", fieldPrefix),
+				Issue: "Custom field id must contain only alphanumeric characters, underscores, or hyphens",
+			})
+		} else if seenIDs[trimmedID] {
+			details = append(details, ErrorDetail{
+				Field: fmt.Sprintf("%s.id", fieldPrefix),
+				Issue: fmt.Sprintf("Duplicate custom field id: %s", trimmedID),
+			})
+		} else {
+			seenIDs[trimmedID] = true
+		}
+
+		if strings.TrimSpace(field.Label) == "" {
+			details = append(details, ErrorDetail{
+				Field: fmt.Sprintf("%s.label", fieldPrefix),
+				Issue: "Custom field label is required",
+			})
+		}
+
+		fType := strings.ToLower(strings.TrimSpace(field.Type))
+		switch fType {
+		case "text", "number", "url", "select", "textarea", "boolean":
+			if fType == "select" {
+				if len(field.Options) == 0 {
+					details = append(details, ErrorDetail{
+						Field: fmt.Sprintf("%s.options", fieldPrefix),
+						Issue: "Custom field of type 'select' must have at least one option",
+					})
+				} else {
+					for optIdx, opt := range field.Options {
+						if strings.TrimSpace(opt) == "" {
+							details = append(details, ErrorDetail{
+								Field: fmt.Sprintf("%s.options[%d]", fieldPrefix, optIdx),
+								Issue: "Option value cannot be blank",
+							})
+						}
+					}
+				}
+			}
+		default:
+			details = append(details, ErrorDetail{
+				Field: fmt.Sprintf("%s.type", fieldPrefix),
+				Issue: "Invalid field type. Must be one of: text, number, url, select, textarea, boolean",
+			})
+		}
+	}
+
+	return details
+}
+
+// ValidateJobInput checks all attributes when creating a job.
+func ValidateJobInput(
+	title, department, location, descriptionMarkdown string,
+	empType EmploymentType,
+	status JobStatus,
+	experienceLevel *string,
+	salaryMin, salaryMax *float64,
+	salaryCurrency string,
+	slug string,
+	customFields []CustomField,
+) []ErrorDetail {
+	var details []ErrorDetail
+
+	trimmedTitle := strings.TrimSpace(title)
+	if trimmedTitle == "" {
+		details = append(details, ErrorDetail{
+			Field: "title",
+			Issue: "Title is required",
+		})
+	} else if len(trimmedTitle) > 255 {
+		details = append(details, ErrorDetail{
+			Field: "title",
+			Issue: "Title cannot exceed 255 characters",
+		})
+	}
+
+	trimmedDept := strings.TrimSpace(department)
+	if trimmedDept == "" {
+		details = append(details, ErrorDetail{
+			Field: "department",
+			Issue: "Department is required",
+		})
+	} else if len(trimmedDept) > 100 {
+		details = append(details, ErrorDetail{
+			Field: "department",
+			Issue: "Department cannot exceed 100 characters",
+		})
+	}
+
+	trimmedLoc := strings.TrimSpace(location)
+	if trimmedLoc == "" {
+		details = append(details, ErrorDetail{
+			Field: "location",
+			Issue: "Location is required",
+		})
+	} else if len(trimmedLoc) > 150 {
+		details = append(details, ErrorDetail{
+			Field: "location",
+			Issue: "Location cannot exceed 150 characters",
+		})
+	}
+
+	if strings.TrimSpace(descriptionMarkdown) == "" {
+		details = append(details, ErrorDetail{
+			Field: "description_markdown",
+			Issue: "Description markdown is required",
+		})
+	}
+
+	if empType != "" && !IsValidEmploymentType(empType) {
+		details = append(details, ErrorDetail{
+			Field: "employment_type",
+			Issue: "Invalid employment_type. Must be one of: full_time, part_time, contract, internship",
+		})
+	}
+
+	if status != "" && !IsValidJobStatus(status) {
+		details = append(details, ErrorDetail{
+			Field: "status",
+			Issue: "Invalid status. Must be one of: draft, published, archived",
+		})
+	}
+
+	if experienceLevel != nil {
+		if len(strings.TrimSpace(*experienceLevel)) > 50 {
+			details = append(details, ErrorDetail{
+				Field: "experience_level",
+				Issue: "Experience level cannot exceed 50 characters",
+			})
+		}
+	}
+
+	if salaryCurrency != "" && len(strings.TrimSpace(salaryCurrency)) > 3 {
+		details = append(details, ErrorDetail{
+			Field: "salary_currency",
+			Issue: "Salary currency code cannot exceed 3 characters",
+		})
+	}
+
+	if salaryMin != nil && *salaryMin < 0 {
+		details = append(details, ErrorDetail{
+			Field: "salary_min",
+			Issue: "Salary min must be greater than or equal to 0",
+		})
+	}
+
+	if salaryMax != nil && *salaryMax < 0 {
+		details = append(details, ErrorDetail{
+			Field: "salary_max",
+			Issue: "Salary max must be greater than or equal to 0",
+		})
+	}
+
+	if salaryMin != nil && salaryMax != nil && *salaryMin > *salaryMax {
+		details = append(details, ErrorDetail{
+			Field: "salary_min",
+			Issue: "Salary min cannot exceed salary max",
+		})
+	}
+
+	if slug != "" && !IsValidSlug(slug) {
+		details = append(details, ErrorDetail{
+			Field: "slug",
+			Issue: "Slug must be a URL-safe lowercase alphanumeric string with hyphens (max 255 chars)",
+		})
+	}
+
+	if len(customFields) > 0 {
+		cfDetails := ValidateCustomFields(customFields)
+		if len(cfDetails) > 0 {
+			details = append(details, cfDetails...)
+		}
+	}
+
+	return details
+}
+
+// ValidateStageUpdate validates candidate stage transition input.
+func ValidateStageUpdate(stage ApplicationStage, rejectedReason *string) []ErrorDetail {
+	var details []ErrorDetail
+
+	if !IsValidStage(stage) {
+		details = append(details, ErrorDetail{
+			Field: "stage",
+			Issue: "Invalid stage. Must be one of: applied, screening, interviewing, offer, hired, rejected",
+		})
+	}
+
+	if rejectedReason != nil && len(strings.TrimSpace(*rejectedReason)) > 255 {
+		details = append(details, ErrorDetail{
+			Field: "rejected_reason",
+			Issue: "Rejected reason cannot exceed 255 characters",
+		})
+	}
+
+	return details
+}
+
+// ValidateNoteInput checks author name and note text for application notes.
+func ValidateNoteInput(authorName, noteText string) []ErrorDetail {
+	var details []ErrorDetail
+
+	trimmedAuthor := strings.TrimSpace(authorName)
+	if trimmedAuthor == "" {
+		details = append(details, ErrorDetail{
+			Field: "author_name",
+			Issue: "Author name is required",
+		})
+	} else if len(trimmedAuthor) > 255 {
+		details = append(details, ErrorDetail{
+			Field: "author_name",
+			Issue: "Author name cannot exceed 255 characters",
+		})
+	}
+
+	if strings.TrimSpace(noteText) == "" {
+		details = append(details, ErrorDetail{
+			Field: "note_text",
+			Issue: "Note text is required",
+		})
+	}
+
+	return details
+}

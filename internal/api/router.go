@@ -101,6 +101,25 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 			admin.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
 				RespondJSON(w, http.StatusOK, map[string]string{"message": "pong"})
 			})
+
+			if jobService != nil && appService != nil {
+				adminHandler := v1.NewAdminHandler(jobService, appService, rc.Logger)
+
+				// Job Management
+				admin.Post("/jobs", adminHandler.CreateJob)
+				admin.Get("/jobs", adminHandler.ListJobs)
+				admin.Get("/jobs/{id}", adminHandler.GetJob)
+				admin.Patch("/jobs/{id}", adminHandler.UpdateJob)
+				admin.Delete("/jobs/{id}", adminHandler.DeleteJob)
+
+				// Candidate & Pipeline Management
+				admin.Get("/jobs/{id}/applications", adminHandler.ListJobApplications)
+				admin.Get("/applications/{id}", adminHandler.GetApplication)
+				admin.Get("/applications/{id}/resume", adminHandler.GetResumeURL)
+				admin.Patch("/applications/{id}/stage", adminHandler.UpdateStage)
+				admin.Post("/applications/{id}/notes", adminHandler.CreateNote)
+				admin.Get("/applications/{id}/notes", adminHandler.ListNotes)
+			}
 		})
 	})
 

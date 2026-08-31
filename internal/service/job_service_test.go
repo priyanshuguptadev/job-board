@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -93,6 +94,9 @@ func (m *mockJobRepo) Update(_ context.Context, job *domain.Job) error {
 }
 
 func (m *mockJobRepo) Delete(_ context.Context, id string) error {
+	if _, ok := m.jobs[id]; !ok {
+		return domain.ErrNotFound
+	}
 	delete(m.jobs, id)
 	return nil
 }
@@ -181,4 +185,106 @@ func TestJobService_ListDepartments(t *testing.T) {
 	depts, err := svc.ListDepartments(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"Engineering", "Product"}, depts)
+}
+
+func TestJobService_AdminCRUD(t *testing.T) {
+	repo := newMockJobRepo()
+	svc := service.NewJobService(repo)
+
+	t.Run("CreateJob validates and persists draft job", func(t *testing.T) {
+		min := 90000.0
+		max := 130000.0
+		input := service.CreateJobInput{
+			Title:               "Backend Engineer",
+			Department:          "Engineering",
+			Location:            "Remote",
+			EmploymentType:      domain.EmploymentTypeFullTime,
+			SalaryMin:           &min,
+			SalaryMax:           &max,
+			DescriptionMarkdown: "Markdown desc",
+			Status:              domain.JobStatusDraft,
+		}
+
+		job, err := svc.CreateJob(context.Background(), input)
+		require.NoError(t, err)
+		assert.NotEmpty(t, job.ID)
+		assert.Equal(t, "backend-engineer", job.Slug)
+		assert.Equal(t, domain.JobStatusDraft, job.Status)
+		assert.Nil(t, job.PublishedAt)
+	})
+
+	t.Run("CreateJob with published status sets PublishedAt", func(t *testing.T) {
+		input := service.CreateJobInput{
+			Title:               "Product Manager",
+			Department:          "Product",
+			Location:            "SF",
+			EmploymentType:      domain.EmploymentTypeContract,
+			DescriptionMarkdown: "PM role",
+			Status:              domain.JobStatusPublished,
+		}
+
+		job, err := svc.CreateJob(context.Background(), input)
+		require.NoError(t, err)
+		assert.NotEmpty(t, job.ID)
+		assert.Equal(t, domain.JobStatusPublished, job.Status)
+		assert.NotNil(t, job.PublishedAt)
+	})
+
+	t.Run("CreateJob validation failure", func(t *testing.T) {
+		input := service.CreateJobInput{
+			Title: "",
+		}
+
+		_, err := svc.CreateJob(context.Background(), input)
+		require.Error(t, err)
+		var valErr *domain.ValidationError
+		require.True(t, errors.As(err, &valErr))
+	})
+
+	t.Run("ListJobs returns all jobs regardless of status", func(t *testing.T) {
+		jobs, total, err := svc.ListJobs(context.Background(), domain.JobListFilter{})
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, total, 2)
+		assert.Len(t, jobs, total)
+	})
+
+	t.Run("UpdateJob updates fields and publishes", func(t *testing.T) {
+		input := service.CreateJobInput{
+			Title:               "QA Engineer",
+			Department:          "Engineering",
+			Location:            "Remote",
+			DescriptionMarkdown: "QA role",
+			Status:              domain.JobStatusDraft,
+		}
+		job, err := svc.CreateJob(context.Background(), input)
+		require.NoError(t, err)
+
+		newTitle := "Senior QA Engineer"
+		newStatus := domain.JobStatusPublished
+		updated, err := svc.UpdateJob(context.Background(), job.ID, service.UpdateJobInput{
+			Title:  &newTitle,
+			Status: &newStatus,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "Senior QA Engineer", updated.Title)
+		assert.Equal(t, domain.JobStatusPublished, updated.Status)
+		assert.NotNil(t, updated.PublishedAt)
+	})
+
+	t.Run("DeleteJob deletes job", func(t *testing.T) {
+		input := service.CreateJobInput{
+			Title:               "Temporary Role",
+			Department:          "Ops",
+			Location:            "NY",
+			DescriptionMarkdown: "Temp role",
+		}
+		job, err := svc.CreateJob(context.Background(), input)
+		require.NoError(t, err)
+
+		err = svc.DeleteJob(context.Background(), job.ID)
+		require.NoError(t, err)
+
+		_, err = svc.GetJob(context.Background(), job.ID)
+		assert.ErrorIs(t, err, domain.ErrNotFound)
+	})
 }
