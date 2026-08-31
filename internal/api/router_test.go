@@ -22,6 +22,7 @@ import (
 	"github.com/priyanshuguptadev/job-board/internal/domain"
 	"github.com/priyanshuguptadev/job-board/internal/service"
 	"github.com/priyanshuguptadev/job-board/internal/storage"
+	"github.com/priyanshuguptadev/job-board/internal/webhook"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -280,6 +281,79 @@ func (m *mockNoteRepo) Delete(_ context.Context, id string) error {
 	return domain.ErrNotFound
 }
 
+type mockWebhookRepo struct {
+	mu   sync.Mutex
+	subs map[string]*domain.WebhookSubscription
+}
+
+func newMockWebhookRepo() *mockWebhookRepo {
+	return &mockWebhookRepo{
+		subs: make(map[string]*domain.WebhookSubscription),
+	}
+}
+
+func (m *mockWebhookRepo) Create(_ context.Context, sub *domain.WebhookSubscription) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.subs[sub.ID] = sub
+	return nil
+}
+
+func (m *mockWebhookRepo) GetByID(_ context.Context, id string) (*domain.WebhookSubscription, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sub, ok := m.subs[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return sub, nil
+}
+
+func (m *mockWebhookRepo) List(_ context.Context) ([]*domain.WebhookSubscription, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var list []*domain.WebhookSubscription
+	for _, s := range m.subs {
+		list = append(list, s)
+	}
+	return list, nil
+}
+
+func (m *mockWebhookRepo) ListActiveByEvent(_ context.Context, event string) ([]*domain.WebhookSubscription, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var list []*domain.WebhookSubscription
+	for _, s := range m.subs {
+		if !s.IsActive {
+			continue
+		}
+		for _, e := range s.Events {
+			if e == "*" || e == event {
+				list = append(list, s)
+				break
+			}
+		}
+	}
+	return list, nil
+}
+
+func (m *mockWebhookRepo) Update(_ context.Context, sub *domain.WebhookSubscription) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.subs[sub.ID] = sub
+	return nil
+}
+
+func (m *mockWebhookRepo) Delete(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.subs[id]; !ok {
+		return domain.ErrNotFound
+	}
+	delete(m.subs, id)
+	return nil
+}
+
 func newTestRouter(db *sql.DB, apiKeyRepo domain.ApiKeyRepository, rps, burst int) http.Handler {
 	return newTestRouterWithRepos(db, apiKeyRepo, nil, nil, nil, rps, burst)
 }
@@ -302,25 +376,29 @@ func newTestRouterWithRepos(db *sql.DB, apiKeyRepo domain.ApiKeyRepository, jobR
 		},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	webhookRepo := newMockWebhookRepo()
+	webhookService := service.NewWebhookService(webhookRepo, nil)
+
 	var jobService service.JobService
 	var appService service.ApplicationService
 	if jobRepo != nil {
-		jobService = service.NewJobService(jobRepo)
+		jobService = service.NewJobService(jobRepo, webhookService)
 		if appRepo != nil {
 			if strg == nil {
 				strg = storage.NewMemoryStorage()
 			}
-			appService = service.NewApplicationService(jobRepo, appRepo, newMockNoteRepo(), strg)
+			appService = service.NewApplicationService(jobRepo, appRepo, newMockNoteRepo(), strg, webhookService)
 		}
 	}
 
 	return api.NewRouter(api.RouterConfig{
-		Config:     cfg,
-		Logger:     logger,
-		DB:         db,
-		ApiKeyRepo: apiKeyRepo,
-		JobService: jobService,
-		AppService: appService,
+		Config:         cfg,
+		Logger:         logger,
+		DB:             db,
+		ApiKeyRepo:     apiKeyRepo,
+		JobService:     jobService,
+		AppService:     appService,
+		WebhookService: webhookService,
 	})
 }
 
@@ -764,4 +842,211 @@ func TestRouterAdminEndpoints(t *testing.T) {
 		router.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusNoContent, rec.Code)
 	})
+}
+
+func TestFullEndToEndWorkflow_WithWebhooks(t *testing.T) {
+	apiKeyRepo := newMockApiKeyRepo()
+	adminRaw, adminKey, err := auth.GenerateKey("Admin Key", domain.ApiKeyScopeAdmin)
+	require.NoError(t, err)
+	require.NoError(t, apiKeyRepo.Create(context.Background(), adminKey))
+
+	pubRaw, pubKey, err := auth.GenerateKey("Public Key", domain.ApiKeyScopePublic)
+	require.NoError(t, err)
+	require.NoError(t, apiKeyRepo.Create(context.Background(), pubKey))
+
+	jobRepo := newMockJobRepo()
+	appRepo := newMockAppRepo()
+	webhookRepo := newMockWebhookRepo()
+	strg := storage.NewMemoryStorage()
+
+	// Channel to collect received webhooks in test receiver
+	type receivedWebhook struct {
+		Event     string
+		Payload   domain.WebhookPayload
+		Signature string
+		Timestamp string
+		RawBody   []byte
+	}
+	webhookCh := make(chan receivedWebhook, 10)
+
+	webhookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var payload domain.WebhookPayload
+		if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		webhookCh <- receivedWebhook{
+			Event:     payload.Event,
+			Payload:   payload,
+			Signature: r.Header.Get(webhook.HeaderSignature),
+			Timestamp: r.Header.Get(webhook.HeaderTimestamp),
+			RawBody:   bodyBytes,
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhookServer.Close()
+
+	dispatcher := webhook.NewDispatcher(webhookRepo, &webhook.DispatcherConfig{
+		HTTPTimeout: 2 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dispatcher.Start(ctx)
+	defer dispatcher.Stop()
+
+	webhookSvc := service.NewWebhookService(webhookRepo, dispatcher)
+	jobSvc := service.NewJobService(jobRepo, webhookSvc)
+	appSvc := service.NewApplicationService(jobRepo, appRepo, newMockNoteRepo(), strg, webhookSvc)
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port:               8080,
+			Env:                "test",
+			LogLevel:           "error",
+			CORSAllowedOrigins: []string{"*"},
+			RateLimitRPS:       20,
+			RateLimitBurst:     50,
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	router := api.NewRouter(api.RouterConfig{
+		Config:         cfg,
+		Logger:         logger,
+		ApiKeyRepo:     apiKeyRepo,
+		JobService:     jobSvc,
+		AppService:     appSvc,
+		WebhookService: webhookSvc,
+	})
+
+	secretToken := "whsec_custom_secret_12345"
+
+	// 1. Register Webhook Subscription via POST /v1/admin/webhooks
+	t.Run("1. Register webhook subscription", func(t *testing.T) {
+		reqBody, _ := json.Marshal(map[string]interface{}{
+			"target_url":   webhookServer.URL,
+			"secret_token": secretToken,
+			"events":       []string{domain.EventJobPublished, domain.EventApplicationCreated, domain.EventApplicationStageUpdated},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/admin/webhooks", bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", adminRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Contains(t, rec.Header().Get("Location"), "/v1/admin/webhooks/")
+	})
+
+	// 2. Create and publish job -> triggers job.published webhook
+	var createdJobID string
+	t.Run("2. Create published job triggers job.published webhook", func(t *testing.T) {
+		jobReq, _ := json.Marshal(map[string]interface{}{
+			"title":                "Distributed Systems Engineer",
+			"department":           "Infrastructure",
+			"location":             "Remote",
+			"employment_type":      "full_time",
+			"description_markdown": "Work on core systems",
+			"status":               "published",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/admin/jobs", bytes.NewReader(jobReq))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", adminRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var job domain.Job
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &job))
+		createdJobID = job.ID
+
+		select {
+		case wh := <-webhookCh:
+			assert.Equal(t, domain.EventJobPublished, wh.Event)
+			assert.NotEmpty(t, wh.Signature)
+			// Verify signature
+			valid := webhook.VerifySignature(secretToken, parseTimestamp(wh.Timestamp), wh.RawBody, wh.Signature, 5*time.Minute)
+			assert.True(t, valid, "Webhook HMAC signature must be valid")
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for job.published webhook")
+		}
+	})
+
+	// 3. Candidate applies via POST /v1/public/jobs/{job_id}/apply -> triggers application.created
+	var createdAppID string
+	t.Run("3. Candidate applies triggers application.created webhook", func(t *testing.T) {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		_ = writer.WriteField("candidate_name", "Diana Prince")
+		_ = writer.WriteField("candidate_email", "diana@example.com")
+		part, err := writer.CreateFormFile("resume", "resume.pdf")
+		require.NoError(t, err)
+		_, _ = part.Write(sampleValidPDF())
+		require.NoError(t, writer.Close())
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/public/jobs/"+createdJobID+"/apply", body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set("X-API-Key", pubRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var app domain.Application
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &app))
+		createdAppID = app.ID
+
+		select {
+		case wh := <-webhookCh:
+			assert.Equal(t, domain.EventApplicationCreated, wh.Event)
+			assert.NotEmpty(t, wh.Signature)
+			valid := webhook.VerifySignature(secretToken, parseTimestamp(wh.Timestamp), wh.RawBody, wh.Signature, 5*time.Minute)
+			assert.True(t, valid, "Webhook HMAC signature must be valid")
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for application.created webhook")
+		}
+	})
+
+	// 4. Update stage -> triggers application.stage_updated webhook
+	t.Run("4. Transition stage triggers application.stage_updated webhook", func(t *testing.T) {
+		stageReq, _ := json.Marshal(map[string]interface{}{
+			"stage": "interviewing",
+		})
+		req := httptest.NewRequest(http.MethodPatch, "/v1/admin/applications/"+createdAppID+"/stage", bytes.NewReader(stageReq))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", adminRaw)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		select {
+		case wh := <-webhookCh:
+			assert.Equal(t, domain.EventApplicationStageUpdated, wh.Event)
+			assert.NotEmpty(t, wh.Signature)
+			valid := webhook.VerifySignature(secretToken, parseTimestamp(wh.Timestamp), wh.RawBody, wh.Signature, 5*time.Minute)
+			assert.True(t, valid, "Webhook HMAC signature must be valid")
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for application.stage_updated webhook")
+		}
+	})
+}
+
+func parseTimestamp(ts string) int64 {
+	var val int64
+	for _, c := range ts {
+		if c >= '0' && c <= '9' {
+			val = val*10 + int64(c-'0')
+		}
+	}
+	return val
+}
+
+func sampleValidPDF() []byte {
+	return []byte("%PDF-1.4 sample pdf content for unit testing")
 }

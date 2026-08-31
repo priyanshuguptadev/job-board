@@ -60,19 +60,21 @@ type ApplicationService interface {
 }
 
 type applicationService struct {
-	jobRepo  domain.JobRepository
-	appRepo  domain.ApplicationRepository
-	noteRepo domain.ApplicationNoteRepository
-	storage  storage.Storage
+	jobRepo        domain.JobRepository
+	appRepo        domain.ApplicationRepository
+	noteRepo       domain.ApplicationNoteRepository
+	storage        storage.Storage
+	webhookService WebhookService
 }
 
 // NewApplicationService creates a new ApplicationService instance.
-func NewApplicationService(jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, noteRepo domain.ApplicationNoteRepository, strg storage.Storage) ApplicationService {
+func NewApplicationService(jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, noteRepo domain.ApplicationNoteRepository, strg storage.Storage, webhookService WebhookService) ApplicationService {
 	return &applicationService{
-		jobRepo:  jobRepo,
-		appRepo:  appRepo,
-		noteRepo: noteRepo,
-		storage:  strg,
+		jobRepo:        jobRepo,
+		appRepo:        appRepo,
+		noteRepo:       noteRepo,
+		storage:        strg,
+		webhookService: webhookService,
 	}
 }
 
@@ -181,6 +183,19 @@ func (s *applicationService) Apply(ctx context.Context, input ApplyInput) (*doma
 		return nil, fmt.Errorf("failed to persist application: %w", err)
 	}
 
+	if s.webhookService != nil {
+		_ = s.webhookService.DispatchEvent(ctx, domain.EventApplicationCreated, domain.ApplicationCreatedData{
+			ApplicationID:  app.ID,
+			JobID:          job.ID,
+			JobTitle:       job.Title,
+			JobSlug:        job.Slug,
+			CandidateName:  app.CandidateName,
+			CandidateEmail: app.CandidateEmail,
+			Stage:          app.Stage,
+			CustomAnswers:  app.CustomAnswers,
+		})
+	}
+
 	return app, nil
 }
 
@@ -260,6 +275,13 @@ func (s *applicationService) UpdateStage(ctx context.Context, id string, input U
 		return nil, domain.ErrNotFound
 	}
 
+	oldStage := app.Stage
+	var oldRejectedReason *string
+	if app.RejectedReason != nil {
+		r := *app.RejectedReason
+		oldRejectedReason = &r
+	}
+
 	details := domain.ValidateStageUpdate(input.Stage, input.RejectedReason)
 	if len(details) > 0 {
 		return nil, &domain.ValidationError{
@@ -275,6 +297,35 @@ func (s *applicationService) UpdateStage(ctx context.Context, id string, input U
 	app.Stage = input.Stage
 	app.RejectedReason = input.RejectedReason
 	app.UpdatedAt = time.Now().UTC()
+
+	if s.webhookService != nil {
+		if oldStage != input.Stage {
+			notesCount := 0
+			if s.noteRepo != nil {
+				notes, _ := s.noteRepo.ListByApplicationID(ctx, id)
+				notesCount = len(notes)
+			}
+			_ = s.webhookService.DispatchEvent(ctx, domain.EventApplicationStageUpdated, domain.ApplicationStageUpdatedData{
+				ApplicationID: app.ID,
+				JobID:         app.JobID,
+				OldStage:      oldStage,
+				NewStage:      input.Stage,
+				NotesCount:    notesCount,
+			})
+
+			if input.Stage == domain.ApplicationStageRejected {
+				_ = s.webhookService.DispatchEvent(ctx, domain.EventApplicationRejected, domain.ApplicationRejectedData{
+					ApplicationID:  app.ID,
+					RejectedReason: input.RejectedReason,
+				})
+			}
+		} else if input.Stage == domain.ApplicationStageRejected && input.RejectedReason != nil && (oldRejectedReason == nil || *oldRejectedReason != *input.RejectedReason) {
+			_ = s.webhookService.DispatchEvent(ctx, domain.EventApplicationRejected, domain.ApplicationRejectedData{
+				ApplicationID:  app.ID,
+				RejectedReason: input.RejectedReason,
+			})
+		}
+	}
 
 	return app, nil
 }

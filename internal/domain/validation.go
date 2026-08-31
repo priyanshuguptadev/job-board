@@ -522,3 +522,60 @@ func ValidateNoteInput(authorName, noteText string) []ErrorDetail {
 
 	return details
 }
+
+// ValidateWebhookSubscriptionInput validates target URL and event subscription list.
+func ValidateWebhookSubscriptionInput(targetURL string, events []string, secretToken *string) []ErrorDetail {
+	var details []ErrorDetail
+
+	trimmedURL := strings.TrimSpace(targetURL)
+	if trimmedURL == "" {
+		details = append(details, ErrorDetail{
+			Field: "target_url",
+			Issue: "target_url is required",
+		})
+	} else if len(trimmedURL) > 1024 {
+		details = append(details, ErrorDetail{
+			Field: "target_url",
+			Issue: "target_url cannot exceed 1024 characters",
+		})
+	} else if !IsValidURL(trimmedURL) {
+		details = append(details, ErrorDetail{
+			Field: "target_url",
+			Issue: "target_url must be a valid HTTP or HTTPS URL",
+		})
+	}
+
+	if len(events) == 0 {
+		details = append(details, ErrorDetail{
+			Field: "events",
+			Issue: "events array must contain at least one event",
+		})
+	} else {
+		for i, event := range events {
+			trimmedEvent := strings.TrimSpace(event)
+			if trimmedEvent == "" {
+				details = append(details, ErrorDetail{
+					Field: fmt.Sprintf("events[%d]", i),
+					Issue: "Event name cannot be blank",
+				})
+			} else if !IsValidWebhookEvent(trimmedEvent) {
+				details = append(details, ErrorDetail{
+					Field: fmt.Sprintf("events[%d]", i),
+					Issue: fmt.Sprintf("Invalid event '%s'. Must be one of: %s, *", trimmedEvent, strings.Join(AllWebhookEvents(), ", ")),
+				})
+			}
+		}
+	}
+
+	if secretToken != nil {
+		trimmedSecret := strings.TrimSpace(*secretToken)
+		if trimmedSecret != "" && len(trimmedSecret) > 255 {
+			details = append(details, ErrorDetail{
+				Field: "secret_token",
+				Issue: "secret_token cannot exceed 255 characters",
+			})
+		}
+	}
+
+	return details
+}

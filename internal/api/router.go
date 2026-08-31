@@ -16,12 +16,13 @@ import (
 
 // RouterConfig contains dependencies and configuration for setting up the router.
 type RouterConfig struct {
-	Config     *config.Config
-	Logger     *slog.Logger
-	DB         *sql.DB
-	ApiKeyRepo domain.ApiKeyRepository
-	JobService service.JobService
-	AppService service.ApplicationService
+	Config         *config.Config
+	Logger         *slog.Logger
+	DB             *sql.DB
+	ApiKeyRepo     domain.ApiKeyRepository
+	JobService     service.JobService
+	AppService     service.ApplicationService
+	WebhookService service.WebhookService
 }
 
 // NewRouter initializes and returns a Chi router configured with middlewares and routes.
@@ -31,6 +32,7 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 	apiKeyRepo := rc.ApiKeyRepo
 	jobService := rc.JobService
 	appService := rc.AppService
+	webhookService := rc.WebhookService
 
 	// Base middlewares
 	r.Use(chimiddleware.RequestID)
@@ -103,7 +105,7 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 			})
 
 			if jobService != nil && appService != nil {
-				adminHandler := v1.NewAdminHandler(jobService, appService, rc.Logger)
+				adminHandler := v1.NewAdminHandler(jobService, appService, webhookService, rc.Logger)
 
 				// Job Management
 				admin.Post("/jobs", adminHandler.CreateJob)
@@ -119,6 +121,12 @@ func NewRouter(rc RouterConfig) *chi.Mux {
 				admin.Patch("/applications/{id}/stage", adminHandler.UpdateStage)
 				admin.Post("/applications/{id}/notes", adminHandler.CreateNote)
 				admin.Get("/applications/{id}/notes", adminHandler.ListNotes)
+
+				// Webhooks Management
+				admin.Post("/webhooks", adminHandler.CreateWebhook)
+				admin.Get("/webhooks", adminHandler.ListWebhooks)
+				admin.Delete("/webhooks/{id}", adminHandler.DeleteWebhook)
+				admin.Post("/webhooks/{id}/test", adminHandler.TestWebhook)
 			}
 		})
 	})

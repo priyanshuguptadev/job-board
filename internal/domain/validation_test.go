@@ -254,3 +254,34 @@ func TestValidateNoteInput(t *testing.T) {
 		assert.Len(t, details, 2)
 	})
 }
+
+func TestValidateWebhookSubscriptionInput(t *testing.T) {
+	t.Run("valid input", func(t *testing.T) {
+		token := "whsec_12345"
+		details := domain.ValidateWebhookSubscriptionInput(
+			"https://example.com/webhook",
+			[]string{domain.EventJobPublished, domain.EventApplicationCreated},
+			&token,
+		)
+		assert.Empty(t, details)
+	})
+
+	t.Run("valid input with wildcard event", func(t *testing.T) {
+		details := domain.ValidateWebhookSubscriptionInput(
+			"https://example.com/webhook",
+			[]string{"*"},
+			nil,
+		)
+		assert.Empty(t, details)
+	})
+
+	t.Run("missing target_url and empty events", func(t *testing.T) {
+		details := domain.ValidateWebhookSubscriptionInput("", []string{}, nil)
+		assert.Len(t, details, 2)
+	})
+
+	t.Run("invalid target_url and invalid event names", func(t *testing.T) {
+		details := domain.ValidateWebhookSubscriptionInput("invalid-url", []string{"invalid.event", ""}, nil)
+		assert.Len(t, details, 3)
+	})
+}

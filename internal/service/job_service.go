@@ -56,15 +56,19 @@ type JobService interface {
 }
 
 type jobService struct {
-	repo domain.JobRepository
+	repo           domain.JobRepository
+	webhookService WebhookService
 }
 
 // NewJobService creates a new JobService instance.
-func NewJobService(repo domain.JobRepository) JobService {
+func NewJobService(repo domain.JobRepository, webhookService WebhookService) JobService {
 	if repo == nil {
 		panic("service: job repo is required")
 	}
-	return &jobService{repo: repo}
+	return &jobService{
+		repo:           repo,
+		webhookService: webhookService,
+	}
 }
 
 // ListPublishedJobs returns paginated published job listings matching the filter.
@@ -190,6 +194,10 @@ func (s *jobService) CreateJob(ctx context.Context, input CreateJobInput) (*doma
 		return nil, err
 	}
 
+	if s.webhookService != nil && job.Status == domain.JobStatusPublished {
+		_ = s.webhookService.DispatchEvent(ctx, domain.EventJobPublished, job)
+	}
+
 	return job, nil
 }
 
@@ -235,6 +243,8 @@ func (s *jobService) UpdateJob(ctx context.Context, id string, input UpdateJobIn
 	if job == nil {
 		return nil, domain.ErrNotFound
 	}
+
+	oldStatus := job.Status
 
 	updatedTitle := job.Title
 	if input.Title != nil {
@@ -339,6 +349,14 @@ func (s *jobService) UpdateJob(ctx context.Context, id string, input UpdateJobIn
 
 	if err := s.repo.Update(ctx, job); err != nil {
 		return nil, err
+	}
+
+	if s.webhookService != nil {
+		if oldStatus != domain.JobStatusPublished && job.Status == domain.JobStatusPublished {
+			_ = s.webhookService.DispatchEvent(ctx, domain.EventJobPublished, job)
+		} else if oldStatus != domain.JobStatusArchived && job.Status == domain.JobStatusArchived {
+			_ = s.webhookService.DispatchEvent(ctx, domain.EventJobArchived, job)
+		}
 	}
 
 	return job, nil

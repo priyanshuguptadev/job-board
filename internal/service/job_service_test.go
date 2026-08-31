@@ -103,7 +103,7 @@ func (m *mockJobRepo) Delete(_ context.Context, id string) error {
 
 func TestJobService_ListPublishedJobs(t *testing.T) {
 	repo := newMockJobRepo()
-	svc := service.NewJobService(repo)
+	svc := service.NewJobService(repo, nil)
 
 	publishedJob := &domain.Job{
 		ID:         "11111111-1111-1111-1111-111111111111",
@@ -142,7 +142,7 @@ func TestJobService_ListPublishedJobs(t *testing.T) {
 
 func TestJobService_GetPublishedJob(t *testing.T) {
 	repo := newMockJobRepo()
-	svc := service.NewJobService(repo)
+	svc := service.NewJobService(repo, nil)
 
 	publishedJob := &domain.Job{
 		ID:         "11111111-1111-1111-1111-111111111111",
@@ -180,7 +180,7 @@ func TestJobService_GetPublishedJob(t *testing.T) {
 
 func TestJobService_ListDepartments(t *testing.T) {
 	repo := newMockJobRepo()
-	svc := service.NewJobService(repo)
+	svc := service.NewJobService(repo, nil)
 
 	depts, err := svc.ListDepartments(context.Background())
 	require.NoError(t, err)
@@ -189,7 +189,7 @@ func TestJobService_ListDepartments(t *testing.T) {
 
 func TestJobService_AdminCRUD(t *testing.T) {
 	repo := newMockJobRepo()
-	svc := service.NewJobService(repo)
+	svc := service.NewJobService(repo, nil)
 
 	t.Run("CreateJob validates and persists draft job", func(t *testing.T) {
 		min := 90000.0
@@ -286,5 +286,64 @@ func TestJobService_AdminCRUD(t *testing.T) {
 
 		_, err = svc.GetJob(context.Background(), job.ID)
 		assert.ErrorIs(t, err, domain.ErrNotFound)
+	})
+}
+
+func TestJobService_EventDispatching(t *testing.T) {
+	repo := newMockJobRepo()
+	mockWS := &mockEventDispatcher{}
+	svc := service.NewJobService(repo, mockWS)
+
+	t.Run("CreateJob with published status dispatches job.published", func(t *testing.T) {
+		mockWS.events = nil
+		_, err := svc.CreateJob(context.Background(), service.CreateJobInput{
+			Title:               "Platform Engineer",
+			Department:          "Engineering",
+			Location:            "Remote",
+			DescriptionMarkdown: "Platform role",
+			Status:              domain.JobStatusPublished,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, mockWS.events, domain.EventJobPublished)
+	})
+
+	t.Run("UpdateJob to published dispatches job.published", func(t *testing.T) {
+		mockWS.events = nil
+		job, err := svc.CreateJob(context.Background(), service.CreateJobInput{
+			Title:               "Data Engineer",
+			Department:          "Data",
+			Location:            "Remote",
+			DescriptionMarkdown: "Data role",
+			Status:              domain.JobStatusDraft,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, mockWS.events)
+
+		pubStatus := domain.JobStatusPublished
+		_, err = svc.UpdateJob(context.Background(), job.ID, service.UpdateJobInput{
+			Status: &pubStatus,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, mockWS.events, domain.EventJobPublished)
+	})
+
+	t.Run("UpdateJob to archived dispatches job.archived", func(t *testing.T) {
+		mockWS.events = nil
+		job, err := svc.CreateJob(context.Background(), service.CreateJobInput{
+			Title:               "Security Lead",
+			Department:          "Security",
+			Location:            "Remote",
+			DescriptionMarkdown: "Security role",
+			Status:              domain.JobStatusPublished,
+		})
+		require.NoError(t, err)
+		mockWS.events = nil
+
+		archivedStatus := domain.JobStatusArchived
+		_, err = svc.UpdateJob(context.Background(), job.ID, service.UpdateJobInput{
+			Status: &archivedStatus,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, mockWS.events, domain.EventJobArchived)
 	})
 }

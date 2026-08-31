@@ -196,8 +196,8 @@ func (m *mockNoteRepo) Delete(_ context.Context, id string) error {
 }
 
 func setupPublicTestRouter(jobRepo domain.JobRepository, appRepo domain.ApplicationRepository, strg storage.Storage) http.Handler {
-	jobSvc := service.NewJobService(jobRepo)
-	appSvc := service.NewApplicationService(jobRepo, appRepo, newMockNoteRepo(), strg)
+	jobSvc := service.NewJobService(jobRepo, nil)
+	appSvc := service.NewApplicationService(jobRepo, appRepo, newMockNoteRepo(), strg, nil)
 	h := v1.NewPublicHandler(jobSvc, appSvc, nil)
 
 	r := chi.NewRouter()

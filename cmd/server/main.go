@@ -21,6 +21,7 @@ import (
 	"github.com/priyanshuguptadev/job-board/internal/service"
 	"github.com/priyanshuguptadev/job-board/internal/storage"
 	"github.com/priyanshuguptadev/job-board/internal/store/postgres"
+	"github.com/priyanshuguptadev/job-board/internal/webhook"
 )
 
 func main() {
@@ -111,10 +112,16 @@ func runServer() {
 		strg = storage.NewMemoryStorage()
 	}
 
+	// Server run context for graceful shutdown
+	serverCtx, serverStopCtx := context.WithCancel(context.Background())
+
 	var apiKeyRepo domain.ApiKeyRepository
 	var jobRepo domain.JobRepository
 	var appRepo domain.ApplicationRepository
 	var appNoteRepo domain.ApplicationNoteRepository
+	var webhookRepo domain.WebhookSubscriptionRepository
+	var webhookDispatcher webhook.Dispatcher
+	var webhookService service.WebhookService
 	var jobService service.JobService
 	var appService service.ApplicationService
 
@@ -123,17 +130,27 @@ func runServer() {
 		jobRepo = postgres.NewJobRepository(db)
 		appRepo = postgres.NewApplicationRepository(db)
 		appNoteRepo = postgres.NewApplicationNoteRepository(db)
-		jobService = service.NewJobService(jobRepo)
-		appService = service.NewApplicationService(jobRepo, appRepo, appNoteRepo, strg)
+		webhookRepo = postgres.NewWebhookSubscriptionRepository(db)
+
+		webhookDispatcher = webhook.NewDispatcher(webhookRepo, &webhook.DispatcherConfig{
+			Logger: l,
+		})
+		webhookDispatcher.Start(serverCtx)
+		defer webhookDispatcher.Stop()
+
+		webhookService = service.NewWebhookService(webhookRepo, webhookDispatcher)
+		jobService = service.NewJobService(jobRepo, webhookService)
+		appService = service.NewApplicationService(jobRepo, appRepo, appNoteRepo, strg, webhookService)
 	}
 
 	router := api.NewRouter(api.RouterConfig{
-		Config:     cfg,
-		Logger:     l,
-		DB:         db,
-		ApiKeyRepo: apiKeyRepo,
-		JobService: jobService,
-		AppService: appService,
+		Config:         cfg,
+		Logger:         l,
+		DB:             db,
+		ApiKeyRepo:     apiKeyRepo,
+		JobService:     jobService,
+		AppService:     appService,
+		WebhookService: webhookService,
 	})
 
 	srv := &http.Server{
@@ -143,9 +160,6 @@ func runServer() {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-
-	// Server run context for graceful shutdown
-	serverCtx, serverStopCtx := context.WithCancel(context.Background())
 
 	// Listen for syscall signals for process to interrupt/quit
 	sig := make(chan os.Signal, 1)
