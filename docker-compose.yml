@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jobboard-api
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    environment:
+      - SERVER_PORT=8080
+      - SERVER_ENV=${SERVER_ENV:-development}
+      - SERVER_LOG_LEVEL=${SERVER_LOG_LEVEL:-info}
+      - SERVER_CORS_ALLOWED_ORIGINS=${SERVER_CORS_ALLOWED_ORIGINS:-*}
+      - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-20}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-50}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-jobboard}:${POSTGRES_PASSWORD:-jobboard}@postgres:5432/${POSTGRES_DB:-jobboard}?sslmode=disable
+      - DATABASE_MAX_OPEN_CONNS=25
+      - DATABASE_MAX_IDLE_CONNS=10
+      - S3_ENDPOINT=http://minio:9000
+      - S3_REGION=us-east-1
+      - S3_BUCKET=${S3_BUCKET:-resumes}
+      - S3_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - S3_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - S3_FORCE_PATH_STYLE=true
+      - S3_PRESIGN_EXPIRY_MINUTES=15
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: jobboard-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobboard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobboard}
+      POSTGRES_DB: ${POSTGRES_DB:-jobboard}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobboard} -d ${POSTGRES_DB:-jobboard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: jobboard-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: jobboard-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set localminio http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      /usr/bin/mc mb --ignore-existing localminio/${S3_BUCKET:-resumes};
+      exit 0;
+      "
+
+volumes:
+  postgres_data:
+  minio_data:

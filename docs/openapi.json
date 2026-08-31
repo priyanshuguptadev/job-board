@@ -1,0 +1,1294 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Job Board API",
+    "version": "1.0.0",
+    "description": "An open-source, single-tenant, headless Job Board REST API written in Go, backed by PostgreSQL and S3-compatible object storage.",
+    "contact": {
+      "name": "Job Board API Support"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Current Server"
+    }
+  ],
+  "security": [
+    {
+      "ApiKeyAuth": []
+    },
+    {
+      "BearerAuth": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "summary": "Liveness and readiness health check",
+        "description": "Checks the server status and database connectivity.",
+        "tags": ["System"],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Server is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "database": {
+                      "type": "string",
+                      "example": "connected"
+                    }
+                  },
+                  "required": ["status", "database"]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable / Database unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "unhealthy"
+                    },
+                    "database": {
+                      "type": "string",
+                      "example": "unreachable"
+                    },
+                    "error": {
+                      "type": "string",
+                      "example": "connection refused"
+                    }
+                  },
+                  "required": ["status", "database"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/public/jobs": {
+      "get": {
+        "summary": "List published jobs",
+        "description": "Retrieves a paginated list of published jobs with optional filtering by department, location, and employment type.",
+        "tags": ["Public Careers"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "department",
+            "in": "query",
+            "required": false,
+            "description": "Filter by department name",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": false,
+            "description": "Filter by location substring",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "employment_type",
+            "in": "query",
+            "required": false,
+            "description": "Filter by employment type",
+            "schema": {
+              "$ref": "#/components/schemas/EmploymentType"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Page number (default: 1)",
+            "schema": { "type": "integer", "default": 1, "minimum": 1 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Items per page (default: 20, max: 100)",
+            "schema": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of published jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/JobSummary"
+                      }
+                    },
+                    "pagination": {
+                      "$ref": "#/components/schemas/Pagination"
+                    }
+                  },
+                  "required": ["data", "pagination"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimitExceeded" }
+        }
+      }
+    },
+    "/v1/public/jobs/{slug_or_id}": {
+      "get": {
+        "summary": "Get published job details",
+        "description": "Retrieves the complete details of a published job listing including custom application fields by slug or UUID.",
+        "tags": ["Public Careers"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "slug_or_id",
+            "in": "path",
+            "required": true,
+            "description": "Job slug or UUID",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job details with custom fields schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimitExceeded" }
+        }
+      }
+    },
+    "/v1/public/departments": {
+      "get": {
+        "summary": "List departments",
+        "description": "Lists distinct departments that currently have active published job openings.",
+        "tags": ["Public Careers"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of active department names",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "departments": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "example": ["Engineering", "Product", "Design"]
+                    }
+                  },
+                  "required": ["departments"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "$ref": "#/components/responses/RateLimitExceeded" }
+        }
+      }
+    },
+    "/v1/public/jobs/{job_id}/apply": {
+      "post": {
+        "summary": "Submit candidate application",
+        "description": "Submits a candidate application with resume file and dynamic custom question answers for a published job.",
+        "tags": ["Public Careers"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "description": "Target job UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "candidate_name": {
+                    "type": "string",
+                    "description": "Full name of candidate",
+                    "example": "Jane Doe"
+                  },
+                  "candidate_email": {
+                    "type": "string",
+                    "format": "email",
+                    "description": "Email address of candidate",
+                    "example": "jane.doe@example.com"
+                  },
+                  "candidate_phone": {
+                    "type": "string",
+                    "description": "Phone number (optional)",
+                    "example": "+1 555-0199"
+                  },
+                  "linkedin_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "LinkedIn profile URL (optional)",
+                    "example": "https://linkedin.com/in/janedoe"
+                  },
+                  "resume": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Resume attachment file (PDF, DOC, DOCX up to 10MB)"
+                  },
+                  "custom_answers": {
+                    "type": "string",
+                    "description": "JSON string containing key-value pairs of answers corresponding to job's custom_fields definitions",
+                    "example": "{\"years_experience\": 5, \"github_url\": \"https://github.com/janedoe\"}"
+                  }
+                },
+                "required": ["candidate_name", "candidate_email", "resume"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Application submitted successfully",
+            "headers": {
+              "Location": {
+                "description": "URI of the created candidate application",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "string", "format": "uuid" },
+                    "message": { "type": "string", "example": "Application submitted successfully." }
+                  },
+                  "required": ["id", "message"]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimitExceeded" }
+        }
+      }
+    },
+    "/v1/admin/jobs": {
+      "post": {
+        "summary": "Create job listing",
+        "description": "Creates a new job listing with optional salary range, employment type, and dynamic custom application fields.",
+        "tags": ["Admin Jobs"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateJobRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Job created successfully",
+            "headers": {
+              "Location": {
+                "description": "URI of the created job",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Job" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      },
+      "get": {
+        "summary": "List all jobs (Admin)",
+        "description": "Lists all jobs with filtering by status (draft, published, archived), department, and pagination.",
+        "tags": ["Admin Jobs"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Filter by job status",
+            "schema": { "$ref": "#/components/schemas/JobStatus" }
+          },
+          {
+            "name": "department",
+            "in": "query",
+            "required": false,
+            "description": "Filter by department",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Page number (default: 1)",
+            "schema": { "type": "integer", "default": 1, "minimum": 1 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Items per page (default: 20, max: 100)",
+            "schema": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Job" }
+                    },
+                    "pagination": { "$ref": "#/components/schemas/Pagination" }
+                  },
+                  "required": ["data", "pagination"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/v1/admin/jobs/{id}": {
+      "get": {
+        "summary": "Get job by ID",
+        "description": "Retrieves full details of any job (regardless of status).",
+        "tags": ["Admin Jobs"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Job UUID or slug",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full job details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Job" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "patch": {
+        "summary": "Update job",
+        "description": "Updates job metadata, status, salary, custom question schema, or description.",
+        "tags": ["Admin Jobs"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Job UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UpdateJobRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated job details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Job" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      },
+      "delete": {
+        "summary": "Delete or archive job",
+        "description": "Deletes the specified job listing.",
+        "tags": ["Admin Jobs"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Job UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Job deleted successfully"
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/admin/jobs/{id}/applications": {
+      "get": {
+        "summary": "List applications for a job",
+        "description": "Lists all candidate applications submitted for the specified job, filterable by hiring stage.",
+        "tags": ["Admin Applications"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Job UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          },
+          {
+            "name": "stage",
+            "in": "query",
+            "required": false,
+            "description": "Filter by hiring stage",
+            "schema": { "$ref": "#/components/schemas/ApplicationStage" }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Page number (default: 1)",
+            "schema": { "type": "integer", "default": 1, "minimum": 1 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Items per page (default: 20, max: 100)",
+            "schema": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of applications",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Application" }
+                    },
+                    "pagination": { "$ref": "#/components/schemas/Pagination" }
+                  },
+                  "required": ["data", "pagination"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/v1/admin/applications/{id}": {
+      "get": {
+        "summary": "Get application details",
+        "description": "Retrieves candidate application details, custom question answers, and current hiring stage.",
+        "tags": ["Admin Applications"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Application UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Application details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Application" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/admin/applications/{id}/resume": {
+      "get": {
+        "summary": "Get presigned resume download URL",
+        "description": "Generates a time-limited presigned S3 download URL to securely retrieve candidate's resume attachment.",
+        "tags": ["Admin Applications"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Application UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Presigned download URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "download_url": {
+                      "type": "string",
+                      "format": "uri",
+                      "example": "https://s3.amazonaws.com/my-bucket/resumes/...?X-Amz-Signature=..."
+                    },
+                    "expires_in": {
+                      "type": "integer",
+                      "description": "Expiration duration in seconds",
+                      "example": 900
+                    }
+                  },
+                  "required": ["download_url", "expires_in"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/admin/applications/{id}/stage": {
+      "patch": {
+        "summary": "Update application hiring stage",
+        "description": "Transitions the candidate through pipeline stages ('applied', 'screening', 'interviewing', 'offer', 'hired', 'rejected'). Triggers webhook notifications.",
+        "tags": ["Admin Applications"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Application UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stage": {
+                    "$ref": "#/components/schemas/ApplicationStage"
+                  },
+                  "rejected_reason": {
+                    "type": "string",
+                    "description": "Optional reason when stage is rejected",
+                    "example": "Candidate lacks required Go experience"
+                  }
+                },
+                "required": ["stage"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated application details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Application" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/v1/admin/applications/{id}/notes": {
+      "post": {
+        "summary": "Add note to application",
+        "description": "Appends an internal recruiter/interviewer note or review feedback to an application.",
+        "tags": ["Admin Applications"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Application UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "author_name": {
+                    "type": "string",
+                    "description": "Name of recruiter/interviewer",
+                    "example": "Sarah Recruiter"
+                  },
+                  "note_text": {
+                    "type": "string",
+                    "description": "Content of the review note",
+                    "example": "Candidate performed strongly in systems design interview."
+                  }
+                },
+                "required": ["author_name", "note_text"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Note added successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApplicationNote" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      },
+      "get": {
+        "summary": "List notes for application",
+        "description": "Retrieves all review notes left on a candidate's application in chronological order.",
+        "tags": ["Admin Applications"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Application UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of application notes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "notes": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/ApplicationNote" }
+                    }
+                  },
+                  "required": ["notes"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/admin/webhooks": {
+      "post": {
+        "summary": "Register webhook subscription",
+        "description": "Subscribes an HTTPS URL endpoint to receive HMAC-SHA256 signed event payloads for specified event topics.",
+        "tags": ["Admin Webhooks"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "target_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Target HTTP/HTTPS webhook listener URL",
+                    "example": "https://api.company.com/webhooks/jobboard"
+                  },
+                  "events": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of subscribed event topics (or '*' for all events)",
+                    "example": ["job.published", "application.created", "application.stage_updated"]
+                  }
+                },
+                "required": ["target_url", "events"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Webhook subscription created successfully with generated secret token",
+            "headers": {
+              "Location": {
+                "description": "URI of the created webhook subscription",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WebhookSubscription" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      },
+      "get": {
+        "summary": "List webhook subscriptions",
+        "description": "Retrieves all registered outbound webhook subscriptions.",
+        "tags": ["Admin Webhooks"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of webhook subscriptions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "subscriptions": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/WebhookSubscription" }
+                    }
+                  },
+                  "required": ["subscriptions"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/admin/webhooks/{id}": {
+      "delete": {
+        "summary": "Delete webhook subscription",
+        "description": "Removes an existing webhook subscription.",
+        "tags": ["Admin Webhooks"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Webhook subscription UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Webhook subscription deleted successfully"
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/admin/webhooks/{id}/test": {
+      "post": {
+        "summary": "Trigger test webhook ping",
+        "description": "Dispatches an asynchronous test ping event (`webhook.ping`) with valid HMAC-SHA256 signature to verify receiver connectivity.",
+        "tags": ["Admin Webhooks"],
+        "security": [
+          { "ApiKeyAuth": [] },
+          { "BearerAuth": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Webhook subscription UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Test ping event dispatched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string", "example": "Test webhook triggered" },
+                    "event_id": { "type": "string", "example": "evt_01J8N8P0Z04R2G8E9B6R7W8K1L" }
+                  },
+                  "required": ["message", "event_id"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "name": "X-API-Key",
+        "in": "header",
+        "description": "Scoped API Key header (jb_pub_... for Public, jb_sec_... for Admin)"
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Scoped API Key bearer token (jb_pub_... for Public, jb_sec_... for Admin)"
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Bad Request",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing, malformed, or invalid API key",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Insufficient permissions or wrong API key scope",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Unique constraint violation or slug collision",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "UnsupportedMediaType": {
+        "description": "Uploaded file MIME type is unsupported",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "ValidationError": {
+        "description": "Input payload failed validation rules",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "RateLimitExceeded": {
+        "description": "Rate limit RPS or burst exceeded",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "JobStatus": {
+        "type": "string",
+        "enum": ["draft", "published", "archived"]
+      },
+      "EmploymentType": {
+        "type": "string",
+        "enum": ["full_time", "part_time", "contract", "internship"]
+      },
+      "ApplicationStage": {
+        "type": "string",
+        "enum": ["applied", "screening", "interviewing", "offer", "hired", "rejected"]
+      },
+      "CustomField": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "github_url" },
+          "label": { "type": "string", "example": "GitHub Profile URL" },
+          "type": { "type": "string", "enum": ["text", "number", "boolean", "select", "url"], "example": "url" },
+          "required": { "type": "boolean", "example": true },
+          "options": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Options for 'select' field type",
+            "example": ["Option 1", "Option 2"]
+          }
+        },
+        "required": ["id", "label", "type", "required"]
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "slug": { "type": "string", "example": "staff-backend-engineer" },
+          "title": { "type": "string", "example": "Staff Backend Engineer" },
+          "department": { "type": "string", "example": "Engineering" },
+          "location": { "type": "string", "example": "San Francisco, CA (Hybrid)" },
+          "employment_type": { "$ref": "#/components/schemas/EmploymentType" },
+          "experience_level": { "type": "string", "nullable": true, "example": "Senior / Staff" },
+          "salary_min": { "type": "number", "nullable": true, "example": 160000.00 },
+          "salary_max": { "type": "number", "nullable": true, "example": 210000.00 },
+          "salary_currency": { "type": "string", "example": "USD" },
+          "description_markdown": { "type": "string", "example": "## About the role\nWe are looking for..." },
+          "status": { "$ref": "#/components/schemas/JobStatus" },
+          "custom_fields": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CustomField" }
+          },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "published_at": { "type": "string", "format": "date-time", "nullable": true }
+        },
+        "required": [
+          "id", "slug", "title", "department", "location",
+          "employment_type", "description_markdown", "status",
+          "custom_fields", "created_at", "updated_at"
+        ]
+      },
+      "JobSummary": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "slug": { "type": "string", "example": "staff-backend-engineer" },
+          "title": { "type": "string", "example": "Staff Backend Engineer" },
+          "department": { "type": "string", "example": "Engineering" },
+          "location": { "type": "string", "example": "San Francisco, CA (Hybrid)" },
+          "employment_type": { "$ref": "#/components/schemas/EmploymentType" },
+          "experience_level": { "type": "string", "nullable": true, "example": "Senior / Staff" },
+          "salary_min": { "type": "number", "nullable": true, "example": 160000.00 },
+          "salary_max": { "type": "number", "nullable": true, "example": 210000.00 },
+          "salary_currency": { "type": "string", "example": "USD" },
+          "published_at": { "type": "string", "format": "date-time", "nullable": true }
+        },
+        "required": [
+          "id", "slug", "title", "department", "location",
+          "employment_type"
+        ]
+      },
+      "CreateJobRequest": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "example": "Staff Backend Engineer" },
+          "slug": { "type": "string", "description": "Optional custom slug. If omitted, auto-generated from title.", "example": "staff-backend-engineer" },
+          "department": { "type": "string", "example": "Engineering" },
+          "location": { "type": "string", "example": "San Francisco, CA (Hybrid)" },
+          "employment_type": { "$ref": "#/components/schemas/EmploymentType" },
+          "experience_level": { "type": "string", "example": "Senior / Staff" },
+          "salary_min": { "type": "number", "example": 160000.00 },
+          "salary_max": { "type": "number", "example": 210000.00 },
+          "salary_currency": { "type": "string", "default": "USD", "example": "USD" },
+          "description_markdown": { "type": "string", "example": "## About the role\nWe are looking for a Staff Engineer..." },
+          "status": { "$ref": "#/components/schemas/JobStatus", "default": "draft" },
+          "custom_fields": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CustomField" }
+          }
+        },
+        "required": ["title", "department", "location", "description_markdown"]
+      },
+      "UpdateJobRequest": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "slug": { "type": "string" },
+          "department": { "type": "string" },
+          "location": { "type": "string" },
+          "employment_type": { "$ref": "#/components/schemas/EmploymentType" },
+          "experience_level": { "type": "string" },
+          "salary_min": { "type": "number" },
+          "salary_max": { "type": "number" },
+          "salary_currency": { "type": "string" },
+          "description_markdown": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/JobStatus" },
+          "custom_fields": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CustomField" }
+          }
+        }
+      },
+      "Application": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "job_id": { "type": "string", "format": "uuid" },
+          "candidate_name": { "type": "string", "example": "Jane Doe" },
+          "candidate_email": { "type": "string", "format": "email", "example": "jane.doe@example.com" },
+          "candidate_phone": { "type": "string", "nullable": true, "example": "+1 555-0199" },
+          "linkedin_url": { "type": "string", "format": "uri", "nullable": true, "example": "https://linkedin.com/in/janedoe" },
+          "resume_s3_key": { "type": "string", "example": "resumes/8f03c00c-7729-411a-85d0-9964a7818e9d/jane_resume.pdf" },
+          "resume_filename": { "type": "string", "example": "jane_resume.pdf" },
+          "custom_answers": {
+            "type": "object",
+            "additionalProperties": true,
+            "example": { "years_experience": 5, "github_url": "https://github.com/janedoe" }
+          },
+          "stage": { "$ref": "#/components/schemas/ApplicationStage" },
+          "rejected_reason": { "type": "string", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "required": [
+          "id", "job_id", "candidate_name", "candidate_email",
+          "resume_s3_key", "resume_filename", "custom_answers",
+          "stage", "created_at", "updated_at"
+        ]
+      },
+      "ApplicationNote": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "application_id": { "type": "string", "format": "uuid" },
+          "author_name": { "type": "string", "example": "Sarah Recruiter" },
+          "note_text": { "type": "string", "example": "Strong algorithmic background." },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "application_id", "author_name", "note_text", "created_at"]
+      },
+      "WebhookSubscription": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "target_url": { "type": "string", "format": "uri", "example": "https://api.company.com/webhooks" },
+          "secret_token": { "type": "string", "example": "whsec_98f4a6b2c8e1..." },
+          "events": {
+            "type": "array",
+            "items": { "type": "string" },
+            "example": ["job.published", "application.created"]
+          },
+          "is_active": { "type": "boolean", "example": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "target_url", "secret_token", "events", "is_active", "created_at", "updated_at"]
+      },
+      "Pagination": {
+        "type": "object",
+        "properties": {
+          "page": { "type": "integer", "example": 1 },
+          "limit": { "type": "integer", "example": 20 },
+          "total_items": { "type": "integer", "example": 45 },
+          "total_pages": { "type": "integer", "example": 3 }
+        },
+        "required": ["page", "limit", "total_items", "total_pages"]
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "properties": {
+          "field": { "type": "string", "example": "resume" },
+          "issue": { "type": "string", "example": "File exceeds the maximum allowed size of 10MB" }
+        },
+        "required": ["field", "issue"]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "example": "VALIDATION_ERROR",
+                "enum": [
+                  "INVALID_API_KEY",
+                  "FORBIDDEN",
+                  "NOT_FOUND",
+                  "VALIDATION_ERROR",
+                  "UNSUPPORTED_MEDIA_TYPE",
+                  "RATE_LIMIT_EXCEEDED",
+                  "CONFLICT",
+                  "INTERNAL_SERVER_ERROR",
+                  "METHOD_NOT_ALLOWED"
+                ]
+              },
+              "message": { "type": "string", "example": "The provided input failed validation checks." },
+              "details": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/ErrorDetail" }
+              }
+            },
+            "required": ["code", "message"]
+          }
+        },
+        "required": ["error"]
+      }
+    }
+  }
+}

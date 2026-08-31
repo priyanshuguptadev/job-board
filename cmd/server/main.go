@@ -38,6 +38,8 @@ func main() {
 		runMigrate(os.Args[2:])
 	case "keygen":
 		runKeygen(os.Args[2:])
+	case "seed":
+		runSeed(os.Args[2:])
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -56,6 +58,7 @@ func printUsage() {
 	fmt.Println("  jobboard migrate down [steps]           Roll back migrations (default 1 step)")
 	fmt.Println("  jobboard migrate status                 Show current migration version")
 	fmt.Println("  jobboard keygen --name <n> --scope <s>  Generate an API key (scope: admin|public)")
+	fmt.Println("  jobboard seed                           Bootstrap initial admin and public API keys")
 	fmt.Println()
 }
 
@@ -311,5 +314,83 @@ func runKeygen(args []string) {
 	fmt.Printf("API Key  : %s\n", token)
 	fmt.Println("=================================================================")
 	fmt.Println("Store this key safely! It will NOT be displayed again.")
+	fmt.Println()
+}
+
+func runSeed(args []string) {
+	fs := flag.NewFlagSet("seed", flag.ExitOnError)
+	adminName := fs.String("admin-name", "Initial Admin Key", "Name for the admin API key")
+	pubName := fs.String("public-name", "Default Public Key", "Name for the public API key")
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse seed flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	adminToken, adminApiKey, err := auth.GenerateKey(*adminName, domain.ApiKeyScopeAdmin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to generate admin API key: %v\n", err)
+		os.Exit(1)
+	}
+
+	pubToken, pubApiKey, err := auth.GenerateKey(*pubName, domain.ApiKeyScopePublic)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to generate public API key: %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg, _ := config.Load()
+	if cfg != nil && cfg.Database.URL != "" {
+		db, err := postgres.NewDB(cfg.Database)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not connect to database (%v); generated keys were not persisted.\n", err)
+		} else {
+			defer db.Close()
+
+			// Run auto migrations if needed
+			if err := postgres.MigrateUp(db); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: auto-migration failed: %v\n", err)
+			}
+
+			keyRepo := postgres.NewApiKeyRepository(db)
+			ctx := context.Background()
+
+			savedAdmin := false
+			savedPub := false
+
+			if err := keyRepo.Create(ctx, adminApiKey); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to persist admin API key to database: %v\n", err)
+			} else {
+				savedAdmin = true
+			}
+			if err := keyRepo.Create(ctx, pubApiKey); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to persist public API key to database: %v\n", err)
+			} else {
+				savedPub = true
+			}
+
+			if savedAdmin && savedPub {
+				fmt.Println("Initial API keys successfully saved to database.")
+			}
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Warning: DATABASE_URL not set; generated keys are not persisted to database.")
+	}
+
+	fmt.Println()
+	fmt.Println("=================================================================")
+	fmt.Println("                   BOOTSTRAPPED API KEYS                        ")
+	fmt.Println("=================================================================")
+	fmt.Printf("1. ADMIN API KEY (%s)\n", adminApiKey.Name)
+	fmt.Printf("   Scope  : %s\n", adminApiKey.Scope)
+	fmt.Printf("   Prefix : %s\n", adminApiKey.KeyPrefix)
+	fmt.Printf("   Token  : %s\n", adminToken)
+	fmt.Println("-----------------------------------------------------------------")
+	fmt.Printf("2. PUBLIC API KEY (%s)\n", pubApiKey.Name)
+	fmt.Printf("   Scope  : %s\n", pubApiKey.Scope)
+	fmt.Printf("   Prefix : %s\n", pubApiKey.KeyPrefix)
+	fmt.Printf("   Token  : %s\n", pubToken)
+	fmt.Println("=================================================================")
+	fmt.Println("Store these keys safely! Tokens will NOT be displayed again.")
 	fmt.Println()
 }

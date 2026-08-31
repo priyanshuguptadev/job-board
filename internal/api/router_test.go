@@ -420,6 +420,49 @@ func TestHealthCheck(t *testing.T) {
 	assert.Equal(t, "disabled", body["database"])
 }
 
+func TestOpenAPISpecAndDocs(t *testing.T) {
+	router := newTestRouter(nil, nil, 0, 0)
+
+	t.Run("GET /openapi.json returns valid OpenAPI 3.0 spec", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
+
+		var spec map[string]interface{}
+		err := json.Unmarshal(rec.Body.Bytes(), &spec)
+		require.NoError(t, err)
+		assert.Equal(t, "3.0.3", spec["openapi"])
+
+		info, ok := spec["info"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "Job Board API", info["title"])
+	})
+
+	t.Run("GET /docs returns Swagger UI HTML", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/docs", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+		assert.Contains(t, rec.Body.String(), "<title>Job Board API Documentation</title>")
+		assert.Contains(t, rec.Body.String(), "/openapi.json")
+	})
+
+	t.Run("GET /docs/index.html returns Swagger UI HTML", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/docs/index.html", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+		assert.Contains(t, rec.Body.String(), "<title>Job Board API Documentation</title>")
+	})
+}
+
 func TestNotFoundHandler(t *testing.T) {
 	router := newTestRouter(nil, nil, 0, 0)
 
